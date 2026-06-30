@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">BusVision 辨識器</string>
+    <string name="title_activity_main">BusVision 辨識器</string>
+    <string name="package_name">com.chessman.busvision2.recognizer</string>
+    <string name="custom_url_scheme">com.chessman.busvision2.recognizer</string>
+</resources>

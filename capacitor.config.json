@@ -1,0 +1,14 @@
+{
+  "appId": "com.chessman.busvision2.recognizer",
+  "appName": "BusVision 辨識器",
+  "webDir": "dist",
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 350,
+      "launchAutoHide": true,
+      "backgroundColor": "#fff3f8",
+      "androidSplashResourceName": "splash",
+      "showSpinner": false
+    }
+  }
+}
