@@ -1,21 +1,33 @@
+import { ScanLine, Camera as CameraIcon, ImagePlus, Play, Pause } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import '@tensorflow/tfjs-backend-webgl';
-import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
-import { registerPlugin } from '@capacitor/core';
+import { App } from '@capacitor/app';
+import { getOcrDimensions } from '../services/ocrSizing.js';
+import { recordRecognitionTelemetry } from '../services/recognitionTelemetry.js';
+import { appendLog } from '../services/recognitionStorage.js';
+import { extractLiteralRouteText } from '../services/routeText.js';
+import {runNativePipeline} from '../services/nativeRecognitionPipeline.js';
+import {canUseNativeOcr,recognizeNativeText} from '../services/nativeOcr.js';
+import {literalRouteCandidates} from '../services/nativeRouteSelection.js';
+import { createVehicleDetector } from './vehicleDetector.js';
 
-const BusVisionNative = registerPlugin('BusVisionNative');
+import {readRecognitionContext,clearRecognitionContext,routeMatchesContext} from '../services/recognitionContext.js';
 
 const FOLDER_NAME = 'BusData';
-const LOG_FILE = `${FOLDER_NAME}/recognition_logs.json`;
 const AUTO_INTERVAL_MS = 6500;
-const YOLO_MIN_BUS_SCORE = 0.38;
+const AUTO_CONFIRM_INTERVAL_MS = 500;
+const VEHICLE_MIN_BUS_SCORE = 0.38;
+const VEHICLE_TIMEOUT_MS = 8000;
 const MIN_ROUTE_CROP_W = 72;
 const MIN_ROUTE_CROP_H = 24;
 const OCR_TIMEOUT_MS = 9000;
 const OCR_MAX_SIDE = 1280;
+const RECOGNITION_BUDGET_MS = 12000;
+const VEHICLE_STAGE_BUDGET_MS = 4000;
 const RAW_NOISE_DIGITLIKE_LIMIT = 38;
 const RAW_NOISE_LENGTH_LIMIT = 140;
 const RED_ROUTE_LABEL = '紅色LED路線';
@@ -24,154 +36,13 @@ function nowText() { return new Date().toLocaleString('zh-TW', { hour12: false }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 function dataUrlToBase64(dataUrl) { return String(dataUrl).split(',')[1] || ''; }
 
-function routeNormalizationVariants(text) {
-  const raw = String(text || '').replace(/\s+/g, '').replace(/Ｆ/g, 'F');
-  const base = raw
-    .replace(/[Il!]/g, '1')
-    .replace(/[Zz]/g, '2')
-    .replace(/[Bb]/g, '8')
-    .replace(/[Oo]/g, '0');
-  const variants = new Set();
-  const qChoices = [base.replace(/[Qq]/g, '0'), base.replace(/[Qq]/g, '9')];
-  for (const qv of qChoices) {
-    variants.add(qv.replace(/[g]/g, '9').replace(/[Ss]/g, '5'));
-    variants.add(qv.replace(/[g]/g, '9').replace(/[Ss]/g, '9'));
-    variants.add(qv.replace(/[G]/g, '6').replace(/[Ss]/g, '5'));
-    // 三碼路線常見的首字 9 會被認成 S/g/q；保留一個激進版本，主要處理 932 → g3z / S32。
-    variants.add(qv.replace(/[gGqQSs]/g, '9'));
-  }
-  return [...variants];
-}
-
 function digitLikeCount(text) {
-  return (routeNormalizationVariants(text).join('').match(/\d/g) || []).length;
+  return (String(text || '').match(/\d/g) || []).length;
 }
 
 function normalizeRouteText(text) {
-  if (!text) return '';
-  const matches = [];
-  for (const normalized of routeNormalizationVariants(text)) {
-    for (const m of (normalized.match(/(?:藍|紅|綠|棕|橘)?[Ff]?\d{2,4}(?:副|區間|區|幹線)?/g) || [])) {
-      matches.push(m.toUpperCase());
-    }
-  }
-  if (!matches.length) return '';
-  const rawCompact = String(text || '').replace(/\s+/g, '');
-  const score = (s) => {
-    const digitCount = (s.match(/\d/g) || []).length;
-    const hasPrefix = /^(藍|紅|綠|棕|橘|F)/i.test(s);
-    if (digitCount < 3 && !hasPrefix) return 0;
-    let v = digitCount === 3 ? 130 : digitCount === 4 ? 100 : digitCount === 2 ? 62 : 30;
-    if (/^(藍|紅|綠|棕|橘)/.test(s)) v += 20;
-    if (/^F/i.test(s)) v += 12;
-    if (/副|區|幹線/.test(s)) v += 6;
-    if (/^9\d{2}$/.test(s)) v += 20;
-    if (/^93[0-9]$/.test(s)) v += 14;
-    if (s === '932') v += 24;
-    if (/^0\d{2}$/.test(s)) v -= 18;
-    // 若原文中含有 g/q/S + 3 + z/2 這種形狀，強化 932/9xx 回推。
-    if (/[gqQSs9][3][zZ2]/.test(rawCompact) && /^93[2]$/.test(s)) v += 40;
-    return v;
-  };
-  return [...new Set(matches)].filter((x) => score(x) > 0).sort((a, b) => score(b) - score(a))[0] || '';
-}
-
-
-
-function inferRedLedRouteFromRaw(text) {
-  const compact = String(text || '').replace(/\s+/g, '').toUpperCase();
-  if (!compact) return '';
-  const variants = routeNormalizationVariants(compact).map((v) => v.toUpperCase());
-  for (const v of variants) {
-    const m = v.match(/9[0-9]{2}/);
-    if (m) return m[0];
-  }
-  // LED 點陣常見誤判：932 會被 Tesseract 讀成 Q2H、QZH、92>、S32 等。
-  const shape = compact
-    .replace(/[QO0]/g, '9')
-    .replace(/[SZ]/g, '2')
-    .replace(/[H]/g, '2')
-    .replace(/[>]/g, '2')
-    .replace(/[^0-9A-Z>]/g, '');
-  if (/[QO09S][2Z3][H2Z>]/.test(compact) || /9[23]2/.test(shape) || /92[H2Z>]/.test(compact)) return '932';
-  const nums = shape.match(/\d{2,4}/g) || [];
-  const scored = nums.map((n) => {
-    let score = n.length === 3 ? 10 : n.length === 4 ? 7 : 3;
-    if (n.startsWith('9')) score += 5;
-    if (/^93/.test(n)) score += 3;
-    return { n, score };
-  }).sort((a, b) => b.score - a.score);
-  return scored[0]?.n || '';
-}
-
-function recognizeRedLedByShape(canvas) {
-  try {
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    const W = canvas.width, H = canvas.height;
-    const mask = new Uint8Array(W * H);
-    for (let y = 0; y < H; y += 1) {
-      for (let x = 0; x < W; x += 1) {
-        const i = (y * W + x) * 4;
-        const r = img[i], g = img[i + 1], b = img[i + 2];
-        if (r > 90 && r > g * 1.14 && r > b * 1.10 && r - g > 18) mask[y * W + x] = 1;
-      }
-    }
-    const col = new Array(W).fill(0);
-    for (let x = 0; x < W; x += 1) {
-      let c = 0;
-      for (let y = 0; y < H; y += 1) c += mask[y * W + x];
-      col[x] = c;
-    }
-    const threshold = Math.max(2, H * 0.055);
-    const ranges = [];
-    let inRun = false, start = 0, gap = 0;
-    for (let x = 0; x < W; x += 1) {
-      if (col[x] >= threshold) {
-        if (!inRun) { inRun = true; start = x; gap = 0; }
-        else gap = 0;
-      } else if (inRun) {
-        gap += 1;
-        if (gap > Math.max(3, W * 0.025)) {
-          ranges.push([start, x - gap]);
-          inRun = false; gap = 0;
-        }
-      }
-    }
-    if (inRun) ranges.push([start, W - 1]);
-    const clean = ranges
-      .map(([a, b]) => [Math.max(0, a - 2), Math.min(W - 1, b + 2)])
-      .filter(([a, b]) => b - a >= Math.max(8, W * 0.07));
-    if (clean.length !== 3) return '';
-
-    const classify = ([x1, x2]) => {
-      let minY = H, maxY = 0;
-      for (let y = 0; y < H; y += 1) {
-        for (let x = x1; x <= x2; x += 1) if (mask[y * W + x]) { minY = Math.min(minY, y); maxY = Math.max(maxY, y); }
-      }
-      if (minY >= maxY) return '';
-      const w = x2 - x1 + 1, h = maxY - minY + 1;
-      const cell = (cx, cy) => {
-        const ax = Math.floor(x1 + cx * w / 3), bx = Math.floor(x1 + (cx + 1) * w / 3);
-        const ay = Math.floor(minY + cy * h / 5), by = Math.floor(minY + (cy + 1) * h / 5);
-        let n = 0, total = Math.max(1, (bx - ax) * (by - ay));
-        for (let yy = ay; yy < by; yy += 1) for (let xx = ax; xx < bx; xx += 1) n += mask[yy * W + xx];
-        return n / total;
-      };
-      const g = [];
-      for (let y = 0; y < 5; y += 1) for (let x = 0; x < 3; x += 1) g.push(cell(x, y));
-      const top = (g[0]+g[1]+g[2])/3, mid = (g[6]+g[7]+g[8])/3, bot = (g[12]+g[13]+g[14])/3;
-      const ul = (g[0]+g[3]+g[6])/3, ur = (g[2]+g[5]+g[8])/3, ll = (g[6]+g[9]+g[12])/3, lr = (g[8]+g[11]+g[14])/3;
-      // 先處理 932 圖中三個字的明顯形狀：9 右側/中下較強、3 右側與底部強、2 左下/底部強且右下弱。
-      if (ur > 0.45 && lr > 0.45 && ul > 0.35 && mid > 0.35) return '9';
-      if (ur > 0.38 && lr > 0.38 && ll < 0.22 && bot > 0.30) return '3';
-      if (top > 0.38 && ur > 0.35 && ll > lr + 0.08 && bot > 0.25) return '2';
-      if (ur > 0.35 && lr > 0.35 && top > 0.35 && bot > 0.35) return '3';
-      return '';
-    };
-    const digits = clean.map(classify).join('');
-    return /^\d{3}$/.test(digits) ? digits : '';
-  } catch (_) { return ''; }
+  const candidates = literalRouteCandidates(text);
+  return candidates.length === 1 ? candidates[0] : '';
 }
 
 function isNoisyOcrRaw(raw) {
@@ -192,64 +63,55 @@ function isReliableRoute(route, raw, ocrConfidence, panelScore) {
   const realDigitsInRaw = (compactRaw.match(/\d/g) || []).length;
   const digitsInRaw = Math.max(realDigitsInRaw, digitLikeCount(compactRaw));
   if (digitsInRaw < digitCount) return false;
-  // 避免把反光/欄杆/直線全部轉成 111。若原文完全沒有真數字，也沒有 g/q/S/z 這種 932 常見誤判，不報讀。
-  if (realDigitsInRaw === 0 && !/[gqQSszZ]/.test(compactRaw)) return false;
+  // 沒有實際讀到數字時不報讀。
+  if (realDigitsInRaw === 0) return false;
   if (digitCount === 4 && !/^F/i.test(route) && realDigitsInRaw < 3) return false;
   // OCR 信心太低時不要報讀；拍照/LED 場景可能低一點，所以給保守但不過嚴門檻。
-  if (Number.isFinite(ocrConfidence) && ocrConfidence > 0 && ocrConfidence < 24) return false;
+  if (!Number.isFinite(ocrConfidence) || ocrConfidence < 24) return false;
   if ((panelScore || 0) < 0.50 && digitCount < 4) return false;
   return true;
 }
 
 async function ensureDir() {
-  try { await Filesystem.mkdir({ path: FOLDER_NAME, directory: Directory.Data, recursive: true }); } catch (_) {}
-}
-async function readLogs() {
-  try {
-    const res = await Filesystem.readFile({ path: LOG_FILE, directory: Directory.Data, encoding: Encoding.UTF8 });
-    const arr = JSON.parse(res.data || '[]');
-    return Array.isArray(arr) ? arr : [];
-  } catch (_) { return []; }
-}
-async function writeLogs(items) {
-  await ensureDir();
-  await Filesystem.writeFile({ path: LOG_FILE, directory: Directory.Data, encoding: Encoding.UTF8, data: JSON.stringify(items, null, 2) });
-}
-async function appendLog(item) {
-  const logs = await readLogs();
-  logs.push(item);
-  await writeLogs(logs.slice(-1000));
+  await Filesystem.mkdir({ path: FOLDER_NAME, directory: Directory.Data, recursive: true }).catch(() => {});
 }
 async function saveDataUrl(path, dataUrl) {
   if (!dataUrl) return;
   await ensureDir();
   await Filesystem.writeFile({ directory: Directory.Data, path, data: dataUrlToBase64(dataUrl) });
 }
-async function speak(text) {
+async function speak(text, isCurrent) {
   try {
     await TextToSpeech.speak({ text, lang: 'zh-TW', rate: 1.02, pitch: 1.0, volume: 1.0 });
     return;
-  } catch (_) {}
+  } catch {
+    // Native speech may be unavailable in a browser.
+  }
   try {
-    if ('speechSynthesis' in window) {
+    if (isCurrent() && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'zh-TW';
       u.rate = 1.02;
       window.speechSynthesis.speak(u);
     }
-  } catch (_) {}
+  } catch {
+    // The visual recognition result remains available.
+  }
 }
 async function vibrateOk() {
-  try { await Haptics.impact({ style: ImpactStyle.Light }); } catch (_) {}
+  await Haptics.impact({ style: ImpactStyle.Light }).catch(() => {});
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function withTimeout(promise, ms, label = 'operation') {
+  let timer;
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timeout ${ms}ms`)), ms)),
-  ]);
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timeout ${ms}ms`)), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 function summarizeText(text, n = 80) {
   return String(text || '').replace(/\s+/g, ' ').trim().slice(0, n);
@@ -266,7 +128,11 @@ async function waitForVideoReady(video, timeoutMs = 2600) {
 
 function debugLog(label, payload = {}) {
   try { console.log(`[BusVisionRecognizer] ${label}`, JSON.stringify(payload)); }
-  catch (_) { console.log(`[BusVisionRecognizer] ${label}`, payload); }
+  catch { console.log(`[BusVisionRecognizer] ${label}`, payload); }
+}
+
+function releaseOcrWorker(workerPromise) {
+  void workerPromise?.then((worker) => worker.terminate()).catch(() => {});
 }
 
 function getVisibleCoverSource(video) {
@@ -302,7 +168,7 @@ function chooseBestVehicle(predictions) {
   // 1.4.24：辨識目標是公車路線，不再讓小汽車/路邊車輛把 ROI 拉到錯誤位置。
   // COCO-SSD 在公車照片中常把遠方小車或路人抓成最高分；若拿它當車體 ROI，後續 OCR 會掃到畫面邊緣雜訊。
   const items = (predictions || [])
-    .filter((p) => ['bus', 'truck'].includes(p.class) && p.score >= (p.class === 'bus' ? YOLO_MIN_BUS_SCORE : 0.62))
+    .filter((p) => ['bus', 'truck'].includes(p.class) && p.score >= (p.class === 'bus' ? VEHICLE_MIN_BUS_SCORE : 0.62))
     .map((p) => {
       const [x, y, w, h] = p.bbox || [0, 0, 0, 0];
       const area = Math.max(1, w * h);
@@ -338,12 +204,10 @@ function cropCanvas(src, rect, scale = 1) {
   return c;
 }
 function preprocessForOcr(src, label = '') {
-  const maxSide = OCR_MAX_SIDE;
-  const shrink = Math.min(1, maxSide / Math.max(src.width, src.height));
-  const scale = Math.max(1, shrink * (src.width < 520 ? 2.0 : 1.35));
+  const size = getOcrDimensions(src.width, src.height, OCR_MAX_SIDE);
   const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.floor(src.width * scale));
-  c.height = Math.max(1, Math.floor(src.height * scale));
+  c.width = size.width;
+  c.height = size.height;
   const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(src, 0, 0, c.width, c.height);
@@ -356,7 +220,7 @@ function preprocessForOcr(src, label = '') {
     if (r > 100 && r > g * 1.25 && r > b * 1.15 && r - g > 30) redCount += 1;
   }
   const totalPx = Math.max(1, d.length / 4);
-  const redMode = /紅色|LED/.test(label) || redCount / totalPx > 0.018;
+  const redMode = /紅色/.test(label) && redCount / totalPx > 0.018;
   if (redMode) {
     const mask = new Uint8Array(totalPx);
     for (let i = 0, p = 0; i < d.length; i += 4, p += 1) {
@@ -477,21 +341,6 @@ function buildIntegral(data, w, h) {
 }
 function sumIntegral(obj, x, y, w, h) {
   return integralValue(obj.ii, obj.w, x, y, w, h);
-}
-
-function colorStatsForCanvas(canvas) {
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const img = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  let red = 0, dark = 0, cyanBlue = 0;
-  const total = Math.max(1, canvas.width * canvas.height);
-  for (let i = 0; i < img.length; i += 4) {
-    const r = img[i], g = img[i + 1], b = img[i + 2];
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    if (r > 105 && r > g * 1.28 && r > b * 1.18 && r - g > 34) red += 1;
-    if (lum < 82) dark += 1;
-    if (b > 95 && g > 70 && b > r * 1.10) cyanBlue += 1;
-  }
-  return { redRatio: red / total, darkRatio: dark / total, cyanBlueRatio: cyanBlue / total };
 }
 
 function findColorRouteCandidates(canvas, limit = 4) {
@@ -688,7 +537,7 @@ function findDemoPanels(canvas) {
   const heuristic = panels.map((p) => ({ ...p, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.w), h: Math.round(p.h), kind: p.kind || 'heuristic' }));
   const colorBlocks = findColorRouteCandidates(canvas, portrait ? 5 : 4);
   const textBlocks = findTextBlockCandidates(canvas, portrait ? 8 : 7);
-  const merged = [...colorBlocks, ...textBlocks, ...heuristic].sort((a, b) => {
+  const merged = [...colorBlocks.filter(r=>r.h<H*.4), ...textBlocks, ...heuristic].sort((a, b) => {
     const wa = a.kind === 'red-led-color' ? a.score + 0.35 : a.kind === 'dark-card-color' ? a.score + 0.18 : a.kind === 'text-block' ? a.score + 0.04 : a.score;
     const wb = b.kind === 'red-led-color' ? b.score + 0.35 : b.kind === 'dark-card-color' ? b.score + 0.18 : b.kind === 'text-block' ? b.score + 0.04 : b.score;
     return wb - wa;
@@ -698,33 +547,41 @@ function findDemoPanels(canvas) {
     if (kept.every((k) => rectIoU(k, r) < 0.48)) kept.push(r);
     if (kept.length >= 10) break;
   }
-  return kept;
+  const top=heuristic[0];
+  return [top,...kept.filter(r=>rectIoU(r,top)<.48)];
 }
 
-export default function Recorder() {
+export default function Recorder({ autoStartOnEntry = false }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const cameraRequestRef = useRef(0);
   const autoRef = useRef(null);
-  const busyRef = useRef(false);
+  const activeRef = useRef(false);
+  const liveScanRef = useRef(null);
+  const photoActionRef = useRef(false);
+  const recognitionRef = useRef(null);
+  const ocrWorkerRef = useRef(null);
   const lastSpokenRef = useRef({ route: '', at: 0 });
   const stableRef = useRef({ route: '', count: 0 });
-  const yoloModelRef = useRef(null);
-  const yoloLoadingRef = useRef(false);
+  const vehicleDetectorRef = useRef(null);
+  const vehicleEnabledRef = useRef(false);
+  const mutedRef = useRef(false);
+  const mirrorRef = useRef(false);
 
-  const [status, setStatus] = useState('1.4.19 紅色 LED 優先修正版：匯入/拍照會自動嘗試 YOLO 找公車，並優先用紅色 LED 整體區塊與專用規則判讀路線。');
-  const [engineStatus, setEngineStatus] = useState('診斷模式：YOLO車體 → 紅色LED優先 → 黑字紙牌備援 → 匯出診斷資料');
-  const [cameraStarted, setCameraStarted] = useState(false);
+  const [status, setStatus] = useState('對準公車車頭後辨識，或拍照、匯入照片。');
+  const [engineStatus, setEngineStatus] = useState('號碼牌辨識待命');
   const [running, setRunning] = useState(false);
+  const [previewReady, setPreviewReady] = useState(false);
+  const [stationDisplay,setStationDisplay] = useState(()=>readRecognitionContext());
+  useEffect(()=>{const timer=setInterval(()=>setStationDisplay(readRecognitionContext()),10000);return()=>clearInterval(timer);},[]);
   const [muted, setMuted] = useState(false);
   const [mirrorMode, setMirrorMode] = useState(false);
   const [lastRoute, setLastRoute] = useState('—');
   const [confidence, setConfidence] = useState(0);
   const [rawText, setRawText] = useState('');
-  const [lastFrame, setLastFrame] = useState('');
   const [lastCrop, setLastCrop] = useState('');
   const [candidates, setCandidates] = useState([]);
-  const [manualRoute, setManualRoute] = useState('');
-  const [useYolo, setUseYolo] = useState(false);
+  const [vehicleEnabled, setVehicleEnabled] = useState(false);
   const [busBox, setBusBox] = useState(null);
   const [debugLines, setDebugLines] = useState([]);
   const [debugOpen, setDebugOpen] = useState(false);
@@ -735,35 +592,41 @@ export default function Recorder() {
   };
 
   const stopCamera = () => {
+    setPreviewReady(false);
+    cameraRequestRef.current += 1;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
     if (videoRef.current) videoRef.current.srcObject = null;
-    setCameraStarted(false);
   };
 
   const startCamera = async () => {
+    const request = ++cameraRequestRef.current;
     setStatus('正在啟用 App 內相機...');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       });
+      if (request !== cameraRequestRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        try { await videoRef.current.play(); } catch (_) {}
+        await videoRef.current.play().catch(() => {});
         const ready = await waitForVideoReady(videoRef.current, 3200);
+        if (request !== cameraRequestRef.current) return;
         debugLog('camera-started', { ready, videoWidth: videoRef.current?.videoWidth || 0, videoHeight: videoRef.current?.videoHeight || 0, readyState: videoRef.current?.readyState || 0 });
       }
-      setCameraStarted(true);
-      setStatus('相機預覽已啟用。1.4.18：相簿匯入改用 URI 讀取並先壓縮，避免選圖後 WebView 卡死。');
+      setStatus('相機預覽已啟用');
       pushDebug(`WebView 相機 ready=${videoRef.current?.videoWidth || 0}x${videoRef.current?.videoHeight || 0}`);
     } catch (e) {
+      if (request !== cameraRequestRef.current) return;
       console.error(e);
       setStatus('App 內相機啟用失敗。請改用「拍照辨識」；它會用系統相機拍一張後回到 App 辨識。');
-      setCameraStarted(false);
     }
   };
 
@@ -777,7 +640,7 @@ export default function Recorder() {
     c.width = Math.max(1, Math.round(visible.sw));
     c.height = Math.max(1, Math.round(visible.sh));
     const ctx = c.getContext('2d', { willReadFrequently: true });
-    if (mirrorMode) {
+    if (mirrorRef.current) {
       ctx.translate(c.width, 0);
       ctx.scale(-1, 1);
     }
@@ -786,154 +649,152 @@ export default function Recorder() {
     return c.toDataURL('image/jpeg', 0.86);
   };
 
-  const takeNativeSnapshot = async () => {
-    const filename = `recognizer_${Date.now()}.jpg`;
-    pushDebug('Native CameraX 擷取中...');
-    setStatus('正在用原生相機擷取即時畫面，不會跳出系統相機...');
-    const photo = await BusVisionNative.takePhoto({ filename });
-    if (!photo?.ok || !photo?.path) throw new Error('native takePhoto 沒有回傳圖片路徑');
-    pushDebug(`Native 擷取成功：${photo.path}`);
-    const file = await Filesystem.readFile({ path: photo.path, directory: Directory.Data });
-    const base64 = file?.data || '';
-    if (!base64) throw new Error('讀取原生截圖失敗：空檔案');
-    return `data:image/jpeg;base64,${base64}`;
-  };
-
-  const takePhotoFallback = async () => {
-    // 系統相機會搶走 Camera2；先停止 WebView 預覽，避免返回後 videoWidth=0 或 null 卡死。
-    stopAuto();
-    stopCamera();
-    await sleep(180);
+  const takePhoto = async () => {
     setStatus('開啟拍照辨識：拍一張公車車頭後會回到 App OCR。');
     const photo = await Camera.getPhoto({
       source: CameraSource.Camera,
       resultType: CameraResultType.DataUrl,
       quality: 76,
+      width: 1600,
+      height: 1600,
       allowEditing: false,
       saveToGallery: false,
       promptLabelHeader: '拍攝公車車頭',
       promptLabelPhoto: '拍照',
       promptLabelPicture: '相機',
     });
-    stopCamera();
     return photo.dataUrl;
   };
 
-  const importPhotoRecognize = async () => {
-    try {
-      stopAuto();
-      stopCamera();
-      await sleep(180);
-      setStatus('請從相簿選擇原始公車照片。選取後會先壓縮成分析用尺寸，避免大圖 DataUrl 造成 WebView 卡死。');
-      pushDebug('相簿匯入：等待選圖');
-      debugLog('gallery-import-open', { mode: 'uri-resize', maxSide: 1600 });
-      const photo = await Camera.getPhoto({
-        source: CameraSource.Photos,
-        resultType: CameraResultType.Uri,
-        quality: 90,
-        allowEditing: false,
-        saveToGallery: false,
-        promptLabelHeader: '選擇公車照片',
-        promptLabelPhoto: '相簿',
-        promptLabelPicture: '照片',
-      });
-      debugLog('gallery-import-picked', { hasWebPath: Boolean(photo?.webPath), hasPath: Boolean(photo?.path), format: photo?.format || '' });
-      pushDebug('相簿匯入：圖片讀取與縮放中');
-      setStatus('已選擇照片，正在讀取並縮小圖片...');
-      const dataUrl = await withTimeout(dataUrlFromPhotoUri(photo, 1600), 12000, 'gallery image load');
-      debugLog('gallery-import-ready', { bytes: dataUrl.length });
+  const selectPhoto = async () => {
+    setStatus('請從相簿選擇原始公車照片。選取後會先壓縮成分析用尺寸，避免大圖 DataUrl 造成 WebView 卡死。');
+    pushDebug('相簿匯入：等待選圖');
+    debugLog('gallery-import-open', { mode: 'uri-resize', maxSide: 1600 });
+    const photo = await Camera.getPhoto({
+      source: CameraSource.Photos,
+      resultType: CameraResultType.Uri,
+      quality: 90,
+      allowEditing: false,
+      saveToGallery: false,
+      promptLabelHeader: '選擇公車照片',
+      promptLabelPhoto: '相簿',
+      promptLabelPicture: '照片',
+    });
+    if (!activeRef.current) return null;
+    debugLog('gallery-import-picked', { hasWebPath: Boolean(photo?.webPath), hasPath: Boolean(photo?.path), format: photo?.format || '' });
+    pushDebug('相簿匯入：圖片讀取與縮放中');
+    setStatus('已選擇照片，正在讀取並縮小圖片...');
+    const dataUrl = await withTimeout(dataUrlFromPhotoUri(photo, 1600), 12000, 'gallery image load');
+    if (activeRef.current) {
+      debugLog('gallery-import-ready', { dataUrlChars: dataUrl.length });
       pushDebug('相簿匯入：開始 OCR/候選框分析');
-      await recognizeDataUrl(dataUrl, 'gallery-photo-ocr');
-    } catch (e) {
-      console.error('[BusVision] gallery import failed', e);
-      debugLog('gallery-import-failed', { message: String(e?.message || e) });
-      setStatus(`相簿匯入取消或失敗：${String(e?.message || e).slice(0, 70)}`);
-    } finally {
-      stopCamera();
     }
+    return dataUrl;
   };
 
-  const loadYolo = async () => {
-    if (yoloModelRef.current) {
-      setUseYolo(true);
-      setEngineStatus('YOLO 公車偵測已啟用');
-      return yoloModelRef.current;
-    }
-    if (yoloLoadingRef.current) return null;
-    yoloLoadingRef.current = true;
-    try {
-      setEngineStatus('正在載入 YOLO/COCO-SSD 公車偵測...');
+  const loadVehicleDetector = async (isCurrent) => {
+    const detector = vehicleDetectorRef.current ??= createVehicleDetector(async () => {
       const tf = await import('@tensorflow/tfjs');
-      await tf.setBackend('webgl').catch(async () => tf.setBackend('cpu'));
+      const webglReady = await tf.setBackend('webgl').catch(() => false);
+      if (!webglReady) await tf.setBackend('cpu');
       await tf.ready();
       const cocoSsd = await import('@tensorflow-models/coco-ssd');
-      yoloModelRef.current = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-      setUseYolo(true);
-      setEngineStatus('YOLO 公車偵測已啟用：會先找 bus，再 OCR 號碼區');
-      return yoloModelRef.current;
-    } catch (e) {
-      console.error('[BusVision] YOLO load failed', e);
-      setUseYolo(false);
-      setEngineStatus('YOLO 載入失敗，已回到 OCR 輕量模式');
+      return cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    });
+    const startedAt = performance.now();
+    if (!vehicleEnabledRef.current) setEngineStatus('正在載入 COCO-SSD 公車偵測...');
+    try {
+      const model = await withTimeout(detector.load(), VEHICLE_TIMEOUT_MS, 'COCO-SSD model load');
+      if (!model || !isCurrent()) return null;
+      vehicleEnabledRef.current = true;
+      setVehicleEnabled(true);
+      debugLog('vehicle-model-ready', { elapsedMs: Math.round(performance.now() - startedAt) });
+      setEngineStatus('COCO-SSD 公車偵測已啟用');
+      return detector;
+    } catch (error) {
+      debugLog('vehicle-model-failed', { elapsedMs: Math.round(performance.now() - startedAt), message: String(error) });
+      if (isCurrent()) setEngineStatus('COCO-SSD 暫時無法使用，改用中央區域 OCR');
       return null;
-    } finally {
-      yoloLoadingRef.current = false;
     }
   };
 
-  const detectBusCanvas = async (canvas) => {
-    const model = yoloModelRef.current || await loadYolo();
-    if (!model) return null;
-    setEngineStatus('YOLO 尋找公車中...');
+  const detectBusCanvas = async (canvas, isCurrent) => {
+    const detector = await loadVehicleDetector(isCurrent);
+    if (!detector) return null;
+    setEngineStatus('COCO-SSD 尋找公車中...');
     const maxSide = 640;
     const scale = Math.min(1, maxSide / Math.max(canvas.width, canvas.height));
     const detCanvas = document.createElement('canvas');
     detCanvas.width = Math.max(1, Math.round(canvas.width * scale));
     detCanvas.height = Math.max(1, Math.round(canvas.height * scale));
     detCanvas.getContext('2d').drawImage(canvas, 0, 0, detCanvas.width, detCanvas.height);
-    const preds = await model.detect(detCanvas, 8);
-    debugLog('yolo-predictions', { count: preds.length, preds: preds.slice(0, 5).map(p => ({ class: p.class, score: Math.round(p.score*100), bbox: p.bbox?.map(v => Math.round(v)) })) });
+    const startedAt = performance.now();
+    let preds;
+    try {
+      const prediction = detector.predict(detCanvas, 8);
+      if (!prediction) return null;
+      preds = await withTimeout(prediction, VEHICLE_TIMEOUT_MS, 'COCO-SSD prediction');
+    } catch (error) {
+      debugLog('vehicle-prediction-failed', { elapsedMs: Math.round(performance.now() - startedAt), message: String(error) });
+      if (isCurrent()) setEngineStatus('COCO-SSD 偵測失敗，改用中央區域 OCR');
+      return null;
+    }
+    if (!isCurrent()) return null;
+    debugLog('vehicle-predictions', { elapsedMs: Math.round(performance.now() - startedAt), count: preds.length, preds: preds.slice(0, 5).map(p => ({ class: p.class, score: Math.round(p.score * 100), bbox: p.bbox?.map(v => Math.round(v)) })) });
     const best = chooseBestVehicle(preds);
     if (!best) {
-      setBusBox(null);
-      setEngineStatus('YOLO 未找到公車，改用中央區域 OCR');
+      setEngineStatus('COCO-SSD 未找到公車，改用中央區域 OCR');
       return null;
     }
     const mapped = expandRect({ ...best, x: best.x / scale, y: best.y / scale, w: best.w / scale, h: best.h / scale }, canvas, 0.06);
-    setBusBox(mapped);
-    setEngineStatus(`YOLO 找到 ${best.label} ${(best.score * 100).toFixed(0)}%，開始 OCR`);
+    setEngineStatus(`COCO-SSD 找到 ${best.label} ${(best.score * 100).toFixed(0)}%，開始 OCR`);
     return mapped;
   };
 
-  const runOcr = async (canvas, label = 'roi') => {
+  const runOcr = async (canvas, label = 'roi', timeoutMs = OCR_TIMEOUT_MS) => {
     setEngineStatus(`OCR 辨識中：${label}`);
-    const processed = preprocessForOcr(canvas, label);
-    const dataUrl = processed.toDataURL('image/png');
-    const Tesseract = await import('tesseract.js');
-    debugLog('ocr-start', { label, width: processed.width, height: processed.height });
-    const result = await withTimeout(
-      Tesseract.recognize(dataUrl, 'eng', {
-        logger: () => {},
-        // 公車路線主要是數字，保留少量常被混淆成數字的字母，降低背景英文/雜訊干擾。
-        tessedit_char_whitelist: '0123456789FfOoQqIlZzSsBbGg-',
-        tessedit_pageseg_mode: /數字|號碼|LED|文字|牌/.test(label) ? '8' : '7',
-      }),
-      OCR_TIMEOUT_MS,
-      `OCR ${label}`
+    const startedAt = performance.now();
+    const reusedWorker = Boolean(ocrWorkerRef.current);
+    const workerPromise = ocrWorkerRef.current ??= import('tesseract.js').then(({ createWorker }) =>
+      createWorker('eng', undefined, { errorHandler: (error) => debugLog('ocr-worker-error', { message: String(error) }) }),
     );
+    let result;
+    let setupMs = 0, preprocessMs = 0, engineStartedAt = 0;
+    try {
+      result = await withTimeout(
+        workerPromise.then((worker) => {
+          if (ocrWorkerRef.current !== workerPromise) throw new Error('OCR worker released');
+          setupMs = performance.now() - startedAt;
+          const preprocessStartedAt = performance.now();
+          const processed = preprocessForOcr(canvas, label);
+          preprocessMs = performance.now() - preprocessStartedAt;
+          engineStartedAt = performance.now();
+          debugLog('ocr-start', { label, reusedWorker, width: processed.width, height: processed.height });
+          return worker.recognize(processed);
+        }),
+        Math.max(1, timeoutMs),
+        `OCR ${label}`
+      );
+    } catch (error) {
+      if (ocrWorkerRef.current === workerPromise) {
+        ocrWorkerRef.current = null;
+        releaseOcrWorker(workerPromise);
+      }
+      debugLog('ocr-timeout-or-failed', { label, elapsedMs: Math.round(performance.now() - startedAt), message: String(error) });
+      throw error;
+    }
     const text = result?.data?.text || '';
     const conf = Number(result?.data?.confidence || 0);
-    debugLog('ocr-done', { label, confidence: Math.round(conf), text: summarizeText(text, 50) });
+    debugLog('ocr-done', { label, reusedWorker, setupMs: Math.round(setupMs), preprocessMs: Math.round(preprocessMs), engineMs: Math.round(performance.now() - engineStartedAt), elapsedMs: Math.round(performance.now() - startedAt), confidence: Math.round(conf), text: summarizeText(text, 50) });
     setEngineStatus('OCR 已就緒');
-    return { text, confidence: conf };
+    return { text, confidence: conf, setupMs, preprocessMs, engineMs: performance.now() - engineStartedAt };
   };
 
-  const commitResult = async ({ route, raw, score, frame, crop, rect, source, allCandidates = [], frameWidth = 0, frameHeight = 0 }) => {
+  const commitResult = async ({ route, raw, score, ocrConfidence, frame, crop, rect, vehicle, source, allCandidates, frameWidth, frameHeight, timings, isCurrent }) => {
     setLastRoute(route || '—');
     setConfidence(score || 0);
     setRawText(raw || '');
     if (crop) setLastCrop(crop);
-    if (frame) setLastFrame(frame);
     if (!route) {
       const rawPreview = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 60);
       setStatus(rawPreview ? `尚未讀到可靠路線號碼；OCR 原文：「${rawPreview}」` : '尚未讀到清楚號碼。可再靠近一點，或改用「拍照辨識」。');
@@ -944,54 +805,133 @@ export default function Recorder() {
     const id = `live_${now}`;
     const imagePath = frame ? `${FOLDER_NAME}/${id}_frame.jpg` : '';
     const cropPath = crop ? `${FOLDER_NAME}/${id}_crop.jpg` : '';
-    await saveDataUrl(imagePath, frame);
-    await saveDataUrl(cropPath, crop);
-    await appendLog({
-      id,
-      createdAtMs: now,
-      createdAt: nowText(),
-      routeNumber: route,
-      correctedRouteNumber: '',
-      ocrRawText: raw || '',
-      confidence: score || 0,
-      source,
-      frameWidth,
-      frameHeight,
-      imageWidth: frameWidth,
-      imageHeight: frameHeight,
-      busBox: { label: 'live-demo-vehicle-roi', x: 0, y: 0, w: 1, h: 1, score: 0.5 },
-      panelBox: rect || null,
-      allCandidates: (allCandidates.length ? allCandidates : candidates).slice(0, 8),
-      imagePath,
-      cropPath,
-      isNight: new Date().getHours() >= 18 || new Date().getHours() <= 5,
-      isConfirmed: false,
-    });
-    const shouldSpeak = !muted && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 5000);
+    const shouldSpeak = !mutedRef.current && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 5000);
     if (shouldSpeak) {
       lastSpokenRef.current = { route, at: now };
-      await vibrateOk();
-      await speak(`辨識到 ${route}`);
+      const canSpeak = () => !mutedRef.current && isCurrent();
+      void vibrateOk().then(() => {
+        if (canSpeak()) return speak(`辨識到 ${route}`, canSpeak);
+      });
+    }
+    const saveStartedAt = performance.now();
+    try {
+      await saveDataUrl(imagePath, frame);
+      await saveDataUrl(cropPath, crop);
+      await appendLog({
+        id,
+        createdAtMs: now,
+        createdAt: nowText(),
+        routeNumber: route,
+        correctedRouteNumber: '',
+        ocrRawText: raw || '',
+        confidence: score || 0,
+        source,
+        frameWidth,
+        frameHeight,
+        imageWidth: frameWidth,
+        imageHeight: frameHeight,
+        busBox: vehicle || null,
+        searchSource: vehicle ? 'coco-ssd' : 'center',
+        ocrConfidence,
+        timings,
+        panelBox: rect || null,
+        allCandidates: allCandidates.slice(0, 8),
+        imagePath,
+        cropPath,
+        isNight: new Date().getHours() >= 18 || new Date().getHours() <= 5,
+        isConfirmed: false,
+      });
+      debugLog('recognize-save', { elapsedMs: Math.round(performance.now() - saveStartedAt) });
+    } catch (error) {
+      debugLog('recognize-save-failed', { message: String(error) });
+      if (isCurrent()) setStatus(`已辨識：${route}，但紀錄儲存失敗`);
     }
   };
 
-  const recognizeDataUrl = async (dataUrl, source = 'video-ocr') => {
-    if (busyRef.current) return;
-    busyRef.current = true;
+  const runNativeRecognition = async (dataUrl, source, autoSession, isCurrent) => {
+    const startedAt=performance.now();
+    const diagnostic={source,outcome:'cancelled',stage:'native-ocr',attempted:1};
+    try {
+      setStatus('正在讀取公車路線號碼…');setEngineStatus('手機原生文字辨識');
+      const context=readRecognitionContext();
+      const result=await runNativePipeline(dataUrl,{recognize:recognizeNativeText,context,isCurrent});
+      diagnostic.attempted=result.attempted;
+      if(!isCurrent())return;
+      const selection=result.selection;
+      diagnostic.ocrMs=Math.round(performance.now()-startedAt);
+      diagnostic.pipelineMs=diagnostic.ocrMs;
+      debugLog('native-ocr-result',{engine:result.engine,elapsedMs:diagnostic.ocrMs,lines:result.lines,selected:selection.best?.route||'',reliable:selection.reliable});
+      setBusBox(null);setCandidates(selection.candidates.map(c=>({...c.line,label:c.route,score:c.score})));
+      const best=selection.best;
+      const frame=await canvasFromDataUrl(dataUrl);
+      if(!isCurrent())return;
+      const rect=best?{x:best.line.x*frame.width/result.width,y:best.line.y*frame.height/result.height,w:best.line.w*frame.width/result.width,h:best.line.h*frame.height/result.height,label:'原生文字區',score:best.score}:null;
+      const crop=rect?cropCanvas(frame,rect,1).toDataURL('image/jpeg',.9):'';
+      const raw=result.lines.map(l=>l.text).join(' ');
+      setRawText(raw);setLastCrop(crop);
+      if(!best||!selection.reliable){
+        diagnostic.outcome=selection.rejected.length&&!best?'station-mismatch':best?'unconfirmed':'no-result';
+        setLastRoute(best?.route||'—');setConfidence(best?.route?0.5:0);
+        if(autoSession)stableRef.current={route:'',count:0};
+        setStatus(best?`疑似 ${best.route}，尚未確認，暫不報讀。請再對準車頭號碼。`:selection.rejected.length?`讀到 ${[...new Set(selection.rejected)].join('、')}，與所選站點不符。可清除站點再試。`:'尚未讀到號碼，請讓車頭路線顯示器清楚出現在畫面內。');
+        return;
+      }
+      if(autoSession){
+        stableRef.current=stableRef.current.route===best.route?{route:best.route,count:stableRef.current.count+1}:{route:best.route,count:1};
+        if(stableRef.current.count<2){diagnostic.outcome='unconfirmed';setLastRoute(best.route);setConfidence(.5);setStatus(`疑似 ${best.route}，正在做第二次確認，暫不報讀。`);return true;}
+      }
+      diagnostic.outcome='recognized';diagnostic.stage='commit';
+      const timings={ocrMs:diagnostic.ocrMs,elapsedMs:diagnostic.pipelineMs,attempted:result.attempted,engine:result.engine};
+      debugLog('recognize-result',{source,route:best.route,...timings});
+      await commitResult({route:best.route,raw,score:Math.max(.72,best.score),ocrConfidence:best.ocrConfidence*100,frame:dataUrl,crop,rect,vehicle:null,source,allCandidates:selection.candidates.map(c=>({...c.line,label:c.route,score:c.score})),frameWidth:frame.width,frameHeight:frame.height,timings,isCurrent});
+      diagnostic.stage='done';
+    }catch(error){diagnostic.outcome='error';if(isCurrent()){setLastRoute('—');setConfidence(0);setStatus(`辨識暫時無法完成：${String(error?.message||error).slice(0,70)}。請再試一次。`);}debugLog('native-ocr-failed',{message:String(error)});}
+    finally{diagnostic.totalMs=Math.round(performance.now()-startedAt);recordRecognitionTelemetry(diagnostic);if(isCurrent())setEngineStatus('手機辨識待命');}
+  };
+
+  const runRecognition = async (dataUrl, source, autoSession, isCurrent) => {
+    if(canUseNativeOcr())return runNativeRecognition(dataUrl,source,autoSession,isCurrent);
+    const startedAt = performance.now();
+    const deadline = startedAt + RECOGNITION_BUDGET_MS;
+    const stationContext=readRecognitionContext();
+    const rejectedRoutes=new Set();
+    const diagnostic = { source, outcome: 'cancelled', stage: 'decode', attempted: 0, ocrSetupMs: 0, preprocessMs: 0, ocrEngineMs: 0 };
+    let budgetReached = false;
     try {
       setStatus('抓取畫面並尋找公車/號碼區...');
       const canvas = await canvasFromDataUrl(dataUrl);
-      debugLog('recognize-start', { source, width: canvas.width, height: canvas.height, useYolo: Boolean(useYolo || yoloModelRef.current), maxSide: OCR_MAX_SIDE });
+      if (!isCurrent()) return;
+      const decodeMs = Math.round(performance.now() - startedAt);
+      diagnostic.decodeMs = decodeMs;
+      diagnostic.stage = 'vehicle';
 
       let searchCanvas = canvas;
       let offset = { x: 0, y: 0 };
       let vehicle = null;
 
-      const shouldUseYoloForThisImage = Boolean(useYolo || yoloModelRef.current || source.includes('gallery-photo') || source.includes('camera-photo'));
-      if (shouldUseYoloForThisImage) {
-        vehicle = await detectBusCanvas(canvas);
+      const isPhoto = source === 'gallery-photo-ocr' || source === 'camera-photo-ocr';
+      const useVehicleDetector = vehicleEnabledRef.current || isPhoto;
+      debugLog('recognize-start', { source, width: canvas.width, height: canvas.height, useVehicleDetector, decodeMs });
+      const vehicleStartedAt = performance.now();
+      if (useVehicleDetector) {
+        let vehicleStageActive = true;
+        try {
+          vehicle = await withTimeout(
+            detectBusCanvas(canvas, () => isCurrent() && vehicleStageActive),
+            Math.max(1, Math.min(VEHICLE_STAGE_BUDGET_MS, deadline - performance.now())),
+            'vehicle stage'
+          );
+        } catch (error) {
+          debugLog('vehicle-budget-fallback', { message: String(error) });
+        } finally { vehicleStageActive = false; }
       }
+      if (!isCurrent()) return;
+      const vehicleMs = Math.round(performance.now() - vehicleStartedAt);
+      diagnostic.vehicleMs = vehicleMs;
+      diagnostic.stage = 'roi';
+      setBusBox(vehicle);
 
+      const roiStartedAt = performance.now();
       if (vehicle) {
         searchCanvas = cropCanvas(canvas, vehicle, 1);
         offset = { x: vehicle.x, y: vehicle.y };
@@ -1005,171 +945,291 @@ export default function Recorder() {
       const panels = panelsLocal.map((p) => mapRect(p, offset.x, offset.y));
       debugLog('roi-candidates', { count: panels.length, items: panels.slice(0, 8).map(p => ({ label: p.label, kind: p.kind, x: Math.round(p.x), y: Math.round(p.y), w: Math.round(p.w), h: Math.round(p.h), score: Math.round((p.score || 0) * 100), color: Math.round((p.colorDensity || 0) * 1000) / 1000 })) });
       setCandidates(panels);
-      let best = { route: '', raw: '', score: 0, crop: '', rect: panels[0], ocrConfidence: 0 };
+      let best = { route: '', raw: '', score: 0, crop: null, rect: panels[0], ocrConfidence: null };
 
       const maxPanels = source.includes('camera-photo') ? Math.min(5, panelsLocal.length) : Math.min(4, panelsLocal.length);
+      const roiMs = Math.round(performance.now() - roiStartedAt);
+      diagnostic.roiMs = roiMs;
+      diagnostic.stage = 'ocr';
+      const ocrStartedAt = performance.now();
+      let attempted = 0;
       for (let i = 0; i < maxPanels; i += 1) {
+        const remainingMs = deadline - performance.now();
+        if (remainingMs <= 250) { budgetReached = true; break; }
+        if (!isCurrent()) return;
+        setStatus(`正在辨識候選 ${i + 1}/${maxPanels}，本輪最多約 12 秒`);
         const rectLocal = panelsLocal[i];
         const rectGlobal = panels[i];
         const cropCanvasEl = cropCanvas(searchCanvas, rectLocal, 2.2);
-        const cropData = cropCanvasEl.toDataURL('image/jpeg', 0.86);
-        const ocr = await runOcr(cropCanvasEl, rectGlobal.label || `ROI${i + 1}`);
+        attempted += 1;
+        diagnostic.attempted = attempted;
+        let ocr;
+        try {
+          ocr = await runOcr(cropCanvasEl, rectGlobal.label || `ROI${i + 1}`, Math.min(OCR_TIMEOUT_MS, Math.max(1, deadline - performance.now())));
+        } catch (error) {
+          if (!/timeout/i.test(String(error))) throw error;
+          budgetReached = true;
+          break;
+        }
+        diagnostic.ocrSetupMs += ocr.setupMs;
+        diagnostic.preprocessMs += ocr.preprocessMs;
+        diagnostic.ocrEngineMs += ocr.engineMs;
+        if (!isCurrent()) return;
         const raw = ocr.text || '';
-        const redShapeRoute = rectGlobal.kind === 'red-led-color' ? recognizeRedLedByShape(cropCanvasEl) : '';
-        // 1.4.24：紅色 LED 優先走 LED 專用推論，再進一般 OCR 正規化。
-        // 這可避免「4 921」被一般規則當成 4921，實際上應讀成 921。
-        const route = rectGlobal.kind === 'red-led-color'
-          ? (redShapeRoute || inferRedLedRouteFromRaw(raw) || normalizeRouteText(raw))
+        const isRedLed = rectGlobal.kind === 'red-led-color';
+        const literalRoute = extractLiteralRouteText(raw);
+        const redShapeRoute = '';
+        const route = isRedLed
+          ? (literalRoute || normalizeRouteText(raw))
           : (normalizeRouteText(raw) || '');
         debugLog('route-candidate', { label: rectGlobal.label || `ROI${i + 1}`, route: route || '', redShapeRoute, confidence: Math.round(ocr.confidence || 0), raw: summarizeText(raw, 50), digitLike: digitLikeCount(raw) });
         const digitCountForReliable = (route.match(/\d/g) || []).length;
         const redLedReliable = rectGlobal.kind === 'red-led-color' && route && digitCountForReliable >= 3 && digitCountForReliable <= 4 && Number(ocr.confidence || 0) >= 6 && !isNoisyOcrRaw(raw);
-        const reliable = Boolean(redShapeRoute) || isReliableRoute(route, raw, ocr.confidence, rectGlobal.score) || redLedReliable || ((source.includes('camera-photo') || source.includes('gallery-photo')) && route && digitCountForReliable >= 3 && Number(ocr.confidence || 0) >= 24 && !isNoisyOcrRaw(raw));
+        const visuallyReliable = Boolean(redShapeRoute) || isReliableRoute(route, raw, ocr.confidence, rectGlobal.score) || redLedReliable || (isPhoto && route && digitCountForReliable >= 3 && Number(ocr.confidence || 0) >= 24 && !isNoisyOcrRaw(raw));
+        const mismatch=visuallyReliable&&!routeMatchesContext(route,stationContext);
+        if(mismatch)rejectedRoutes.add(route);
+        const reliable=visuallyReliable&&!mismatch;
         const digitCount = (route.match(/\d/g) || []).length;
         const vehicleBoost = vehicle?.label === 'bus' ? 0.08 : vehicle ? 0.03 : 0;
         const score = reliable
           ? Math.min(0.97, 0.48 + rectGlobal.score * 0.22 + vehicleBoost + Math.min(0.14, digitCount * 0.035) + Math.min(0.08, Math.max(0, ocr.confidence) / 1200))
           : Math.min(0.34, rectGlobal.score * 0.20 + vehicleBoost);
-        if (score > best.score) best = { route: reliable ? route : '', raw, score, crop: cropData, rect: rectGlobal, ocrConfidence: ocr.confidence };
+        if (score > best.score) best = { route: reliable ? route : '', raw, score, crop: cropCanvasEl, rect: rectGlobal, ocrConfidence: ocr.confidence };
         pushDebug(`OCR候選${i + 1} ${rectGlobal.label || ''} conf=${Math.round(ocr.confidence || 0)} route=${route || '無'} reliable=${reliable ? 'Y' : 'N'}`);
         if (reliable && score > 0.78) break;
       }
 
-      if (best.route) {
+      if (!isCurrent()) return;
+      const ocrMs = Math.round(performance.now() - ocrStartedAt);
+      diagnostic.ocrMs = ocrMs;
+      diagnostic.pipelineMs = Math.round(performance.now() - startedAt);
+      diagnostic.outcome = budgetReached ? 'budget-reached' : best.route ? 'recognized' : 'no-result';
+      const crop = best.crop?.toDataURL('image/jpeg', 0.86) || '';
+      const timings = { decodeMs, vehicleMs, roiMs, ocrMs, ocrSetupMs: Math.round(diagnostic.ocrSetupMs), preprocessMs: Math.round(diagnostic.preprocessMs), ocrEngineMs: Math.round(diagnostic.ocrEngineMs), budgetReached, attempted, elapsedMs: Math.round(performance.now() - startedAt) };
+      debugLog('recognize-result', { source, route: best.route, ...timings });
+      if (autoSession && best.route) {
         if (stableRef.current.route === best.route) stableRef.current.count += 1;
         else stableRef.current = { route: best.route, count: 1 };
-        const needConfirm = source.includes('auto');
-        if (needConfirm && stableRef.current.count < 2) {
+        if (stableRef.current.count < 2) {
           setLastRoute(best.route);
           setConfidence(Math.min(best.score, 0.69));
           setRawText(best.raw || '');
-          if (best.crop) setLastCrop(best.crop);
-          if (dataUrl) setLastFrame(dataUrl);
+          if (crop) setLastCrop(crop);
+          diagnostic.outcome = 'unconfirmed';
           setStatus(`疑似 ${best.route}，正在確認第 ${stableRef.current.count}/2 次，不報讀`);
-          return;
+          return true;
         }
-      } else {
+      } else if (autoSession) {
         stableRef.current = { route: '', count: 0 };
       }
-      await commitResult({ route: best.route, raw: best.raw, score: best.route ? best.score : 0, frame: dataUrl, crop: best.crop, rect: best.rect, source, allCandidates: panels, frameWidth: canvas.width, frameHeight: canvas.height });
+      diagnostic.stage = 'commit';
+      await commitResult({ ...best, score: best.route ? best.score : 0, frame: dataUrl, crop, vehicle, source, allCandidates: panels, frameWidth: canvas.width, frameHeight: canvas.height, timings, isCurrent });
+      if (budgetReached && !best.route && isCurrent()) setStatus('本輪等待已達上限，尚未讀到可靠路線。請靠近號碼牌或換一張照片重試。');
+      if (!best.route && rejectedRoutes.size && isCurrent()) {
+        diagnostic.outcome='station-mismatch';
+        setStatus(`讀到 ${[...rejectedRoutes].join('、')}，與「${stationContext.name}」行經路線不符，暫不報讀。請核對站點或清除站點重試。`);
+      }
+      if (budgetReached && isCurrent()) setEngineStatus('本輪辨識已結束');
+      diagnostic.stage = 'done';
     } catch (e) {
+      diagnostic.outcome = 'error';
       console.error('[BusVision] recognize failed', e);
-      setStatus(`辨識失敗：${String(e?.message || e).slice(0, 70)}`);
+      if (isCurrent()) {
+        if (autoSession) stableRef.current = { route: '', count: 0 };
+        setEngineStatus('辨識暫時無法完成');
+        setStatus(`辨識失敗：${String(e?.message || e).slice(0, 70)}`);
+      }
     } finally {
-      busyRef.current = false;
+      diagnostic.totalMs = performance.now() - startedAt;
+      recordRecognitionTelemetry(diagnostic);
+      debugLog('recognize-attempt', diagnostic);
     }
   };
 
-  const detectOnce = async (mode = 'manual') => {
+  const recognizeDataUrl = async (dataUrl, source, autoSession, isCurrent) => {
+    if (recognitionRef.current || !isCurrent()) return;
+    const task = runRecognition(dataUrl, source, autoSession, isCurrent);
+    recognitionRef.current = task;
+    try {
+      return await task;
+    } finally {
+      recognitionRef.current = null;
+    }
+  };
+
+  const detectOnce = async (autoSession = null) => {
+    const scan = { cancelled: false };
+    const isCurrent = () => activeRef.current && !scan.cancelled && !photoActionRef.current && (!autoSession || autoRef.current === autoSession);
+    if (!isCurrent() || liveScanRef.current || recognitionRef.current) return;
+    liveScanRef.current = scan;
     try {
       const v0 = videoRef.current;
       const previewDead = !v0 || !streamRef.current || !v0.videoWidth || v0.readyState < 2;
-      if (!cameraStarted || previewDead) {
-        if (previewDead) {
-          pushDebug('預覽未就緒，重新啟用 WebView 相機');
-          stopCamera();
-          await sleep(220);
-        }
+      if (previewDead) {
+        pushDebug('預覽未就緒，重新啟用 WebView 相機');
+        stopCamera();
+        const request = cameraRequestRef.current;
+        await sleep(220);
+        if (!isCurrent() || request !== cameraRequestRef.current) return;
         await startCamera();
-        await sleep(900);
+        if (!isCurrent()) return;
+        if (!streamRef.current) {
+          if (autoSession) stopAuto({ showStatus: false });
+          return;
+        }
       }
-      const source = mode === 'auto' ? 'auto-preview-ocr' : 'preview-ocr';
+      if (!isCurrent()) return;
+      const source = autoSession ? 'auto-preview-ocr' : 'preview-ocr';
       pushDebug('立即辨識：App 預覽 → 文字方塊定位 → 數字 OCR');
       setStatus('正在從 App 內相機預覽擷取畫面...');
       const dataUrl = await captureFromVideo();
-      await recognizeDataUrl(dataUrl, source);
+      if (!isCurrent()) return;
+      return await recognizeDataUrl(dataUrl, source, autoSession, isCurrent);
     } catch (e) {
+      if (!isCurrent()) return;
+      if (autoSession) stableRef.current = { route: '', count: 0 };
+      if (autoSession && (!videoRef.current?.videoWidth || videoRef.current.readyState < 2)) {
+        stopAuto({ showStatus: false });
+        stopCamera();
+      }
       debugLog('detect-once-failed', { message: String(e?.message || e) });
       pushDebug(`立即辨識失敗：${String(e?.message || e).slice(0, 55)}`);
       setStatus(`立即辨識抓不到 App 內預覽畫面：${String(e?.message || e).slice(0, 60)}。這次不會自動開系統相機；請手動按「拍照辨識」作備援。`);
+    } finally {
+      liveScanRef.current = null;
     }
   };
 
-  const photoRecognize = async () => {
+  const recognizePhoto = async (readPhoto, source, label) => {
+    if (!activeRef.current || photoActionRef.current) return;
+    photoActionRef.current = true;
+    if (liveScanRef.current) liveScanRef.current.cancelled = true;
+    const isCurrent = () => activeRef.current;
+    stopAuto();
+    stopCamera();
     try {
-      const dataUrl = await takePhotoFallback();
-      await recognizeDataUrl(dataUrl, 'camera-photo-ocr');
-      stopCamera();
-      pushDebug('拍照辨識完成；WebView 預覽已關閉，避免返回後卡死');
+      // 交還 WebView 相機資源後才啟動系統相機或相簿。
+      await sleep(180);
+      if (!isCurrent()) return;
+      const dataUrl = await readPhoto();
+      await recognitionRef.current;
+      if (!isCurrent()) return;
+      if (!dataUrl) throw new Error('沒有可讀取的照片');
+      await recognizeDataUrl(dataUrl, source, null, isCurrent);
     } catch (e) {
-      setStatus(`拍照辨識取消或失敗：${String(e?.message || e).slice(0, 40)}`);
+      debugLog('photo-acquisition-failed', { source, message: String(e?.message || e) });
+      if (isCurrent()) setStatus(`${label}取消或失敗：${String(e?.message || e).slice(0, 70)}`);
+    } finally {
+      photoActionRef.current = false;
     }
   };
 
-  const startAuto = async () => {
+  const startAuto = () => {
+    if (!activeRef.current || document.hidden || autoRef.current || photoActionRef.current) return;
+    const session = { timer: null };
+    autoRef.current = session;
+    stableRef.current = { route: '', count: 0 };
     setRunning(true);
-    await detectOnce('auto');
-    if (autoRef.current) clearInterval(autoRef.current);
-    autoRef.current = setInterval(() => detectOnce('auto'), AUTO_INTERVAL_MS);
+    const tick = async () => {
+      const startedAt = performance.now();
+      const scanAgainSoon = liveScanRef.current || recognitionRef.current || await detectOnce(session);
+      if (autoRef.current === session) {
+        const delay = scanAgainSoon
+          ? AUTO_CONFIRM_INTERVAL_MS
+          : Math.max(AUTO_CONFIRM_INTERVAL_MS, AUTO_INTERVAL_MS - (performance.now() - startedAt));
+        session.timer = setTimeout(tick, delay);
+      }
+    };
+    void tick();
   };
-  const stopAuto = () => {
+  const stopAuto = ({ showStatus = true } = {}) => {
     setRunning(false);
-    if (autoRef.current) clearInterval(autoRef.current);
+    clearTimeout(autoRef.current?.timer);
     autoRef.current = null;
-    setStatus('已暫停自動辨識');
+    stableRef.current = { route: '', count: 0 };
+    if (showStatus) setStatus('已暫停自動辨識');
   };
 
-  const saveManual = async (overrideRoute = '') => {
-    const route = (overrideRoute || manualRoute).trim().toUpperCase();
-    if (!route) return;
-    const now = Date.now();
-    const id = `manual_${now}`;
-    const imagePath = lastFrame ? `${FOLDER_NAME}/${id}_frame.jpg` : '';
-    const cropPath = lastCrop ? `${FOLDER_NAME}/${id}_crop.jpg` : '';
-    await saveDataUrl(imagePath, lastFrame);
-    await saveDataUrl(cropPath, lastCrop);
-    await appendLog({ id, createdAtMs: now, createdAt: nowText(), routeNumber: route, correctedRouteNumber: route, ocrRawText: rawText, confidence: 1, source: 'manual-live-demo', imagePath, cropPath, isConfirmed: true });
-    setLastRoute(route);
-    setConfidence(1);
-    setManualRoute('');
-    setStatus(`已記錄：${route}`);
-    if (!muted) {
-      await vibrateOk();
-      await speak(`辨識到 ${route}`);
+  const toggleMute = () => {
+    mutedRef.current = !mutedRef.current;
+    setMuted(mutedRef.current);
+    if (mutedRef.current) {
+      void TextToSpeech.stop().catch(() => {});
+      window.speechSynthesis?.cancel();
     }
+  };
+
+  const toggleMirror = () => {
+    mirrorRef.current = !mirrorRef.current;
+    setMirrorMode(mirrorRef.current);
   };
 
   useEffect(() => {
+    activeRef.current = true;
+    // Release camera resources on backgrounding. Startup policy is set by App.
+    const pausePreview = () => {
+      if (!activeRef.current) return;
+      if (liveScanRef.current) liveScanRef.current.cancelled = true;
+      if (autoRef.current) stopAuto();
+      stopCamera();
+      void TextToSpeech.stop().catch(() => {});
+      window.speechSynthesis?.cancel();
+    };
+    const onVisibility = () => { if (document.hidden) pausePreview(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    const pauseListener = App.addListener('pause', pausePreview);
+    // Defer until the first render settles and discard the timer on unmount.
+    const entryTimer = autoStartOnEntry ? setTimeout(startAuto, 0) : null;
     return () => {
-      if (autoRef.current) clearInterval(autoRef.current);
+      activeRef.current = false;
+      clearTimeout(entryTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      void pauseListener.then((listener) => listener.remove()).catch(() => {});
+      clearTimeout(autoRef.current?.timer);
+      autoRef.current = null;
+      releaseOcrWorker(ocrWorkerRef.current);
+      ocrWorkerRef.current = null;
+      vehicleDetectorRef.current?.dispose();
+      vehicleDetectorRef.current = null;
       stopCamera();
     };
   }, []);
 
   return (
     <div className="bv-recognizer">
-      <video ref={videoRef} autoPlay playsInline muted className="bv-video" style={{ transform: mirrorMode ? 'scaleX(-1)' : 'none' }} />
+      <video ref={videoRef} autoPlay playsInline muted onPlaying={() => setPreviewReady(true)} className={`bv-video ${previewReady ? 'ready' : ''}`} style={{ transform: mirrorMode ? 'scaleX(-1)' : 'none' }} />
 
       <div className="bv-overlay">
         <header className="bv-rec-header">
           <div className="bv-pill">{engineStatus}</div>
           <div className="bv-header-actions">
-            <button onClick={loadYolo} className={`bv-chip ${useYolo ? 'active' : ''}`}>{useYolo ? '🚌 YOLO開' : '🚌 載入YOLO'}</button>
-            <button onClick={() => setMirrorMode((v) => !v)} className="bv-chip">{mirrorMode ? '🪞 鏡像開' : '🪞 鏡像關'}</button>
-            <button onClick={() => setMuted((v) => !v)} className="bv-chip">{muted ? '🔇 靜音' : '🔊 報讀'}</button>
+            <button hidden={canUseNativeOcr()} onClick={() => loadVehicleDetector(() => activeRef.current)} className={`bv-chip ${vehicleEnabled ? 'active' : ''}`}>{vehicleEnabled ? '車體定位開啟' : '車體定位'}</button>
+            <button onClick={toggleMirror} className="bv-chip">{mirrorMode ? '鏡像開' : '鏡像關'}</button>
+            <button onClick={toggleMute} className="bv-chip">{muted ? '靜音' : '報讀'}</button>
           </div>
         </header>
 
-        {lastRoute !== '—' && confidence >= 0.55 && (
+        {lastRoute !== '—' && confidence > 0 && (
           <section className={`bv-result-card floating ${confidence >= 0.72 ? 'high' : 'mid'}`} aria-live="polite">
-            <div className="label">辨識到</div>
+            <div className="label">{confidence >= .72 ? '辨識到' : '待確認'}</div>
             <div className="route">{lastRoute}</div>
-            <div className="confidence">{Math.round(confidence * 100)}%</div>
+            <div className="confidence">規則分數 {Math.round(confidence * 100)} / 100</div>
           </section>
         )}
 
         <div className="bv-aim-guide"><span>請將公車車頭放在框內</span></div>
-        {busBox && <div className="bv-bus-hint">YOLO 已找到公車/車輛</div>}
+        {busBox && <div className="bv-bus-hint">已定位車輛範圍</div>}
 
-        <div className="bv-status-toast">{status}</div>
+        <div className="bv-status-toast" role="status">{status}</div>
+        {stationDisplay&&<div className="station-context"><span>站點輔助：{stationDisplay.name}<small>{stationDisplay.routes.length} 條行經路線 · 30 分鐘內有效</small></span><button onClick={()=>{clearRecognitionContext();setStationDisplay(null);}}>清除</button></div>}
 
         <div className={`bv-debug-panel ${debugOpen ? 'open' : 'collapsed'}`}>
           <button type="button" className="bv-debug-toggle" onClick={() => setDebugOpen((v) => !v)}>
-            {debugOpen ? '收起偵錯' : '展開偵錯'}｜候選 {candidates.length || 0}｜{busBox ? `${busBox.label} ${Math.round(busBox.score * 100)}%` : '無YOLO框'}
+            {debugOpen ? '收起辨識詳情' : '辨識詳情'}
           </button>
           {debugOpen && (
             <div className="bv-debug-body">
-              <div>模式：Live Demo 1.4.23 {useYolo ? '＋YOLO公車偵測' : '＋紅色LED優先'}｜匯入/拍照會自動嘗試 YOLO</div>
+              <div>{vehicleEnabled ? '已啟用 COCO-SSD 車體偵測' : '拍照及匯入會嘗試 COCO-SSD 車體偵測'}</div>
               <div>候選區：{candidates.slice(0, 4).map((c) => `${c.label}${Math.round(c.score * 100)}%`).join(' / ') || '尚未分析'}</div>
               <div>OCR：{rawText ? rawText.replace(/\s+/g, ' ').slice(0, 80) : '—'}</div>
               {debugLines.map((line, idx) => <div key={idx} className="debug-line">{line}</div>)}
@@ -1181,12 +1241,12 @@ export default function Recorder() {
 
         <div className="bv-bottom-panel compact-four">
           <details className="bv-fold-card" open>
-            <summary><span>核心辨識功能</span><b>{running ? '自動中' : '可收折'}</b></summary>
+            <summary><span>對準車頭路線號碼</span><b>{running ? '自動辨識中' : '準備辨識'}</b></summary>
             <div className="bv-control-row main-actions four-actions">
-              <button onClick={() => detectOnce()}><span>🔎</span><strong>立即辨識</strong></button>
-              <button onClick={photoRecognize}><span>🖼️</span><strong>拍照辨識</strong></button>
-              <button onClick={importPhotoRecognize}><span>📁</span><strong>匯入圖片</strong></button>
-              <button onClick={running ? stopAuto : startAuto}><span>{running ? '⏸️' : '▶️'}</span><strong>{running ? '暫停自動' : '自動辨識'}</strong></button>
+              <button className="primary" onClick={() => detectOnce()}><ScanLine size={22}/><strong>立即辨識</strong></button>
+              <button onClick={() => recognizePhoto(takePhoto, 'camera-photo-ocr', '拍照辨識')}><CameraIcon size={22}/><strong>拍照辨識</strong></button>
+              <button onClick={() => recognizePhoto(selectPhoto, 'gallery-photo-ocr', '相簿匯入')}><ImagePlus size={22}/><strong>匯入圖片</strong></button>
+              <button onClick={running ? stopAuto : startAuto}>{running ? <Pause size={22}/> : <Play size={22}/>}<strong>{running ? '暫停自動' : '自動辨識'}</strong></button>
             </div>
           </details>
         </div>

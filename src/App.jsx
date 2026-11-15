@@ -1,49 +1,51 @@
-import React, { useEffect, useState } from 'react';
-import Recorder from './components/Recorder';
-import RecognitionLogs from './components/RecognitionLogs';
-import './index.css';
-import { ScreenOrientation } from '@capacitor/screen-orientation';
-
-function App() {
-  const [mode, setMode] = useState('home');
-
+import { useEffect, useState } from "react";
+import { ScanLine, BusFront, History } from "lucide-react";
+import Recorder from "./components/Recorder";
+import RecognitionLogs from "./components/RecognitionLogs";
+import NearbyBuses from "./components/NearbyBuses";
+import "./index.css";
+import { ScreenOrientation } from "@capacitor/screen-orientation";
+import { Capacitor } from "@capacitor/core";
+export default function App() {
+  const [mode, setMode] = useState("recognize");
+  const autoStartOnEntry = Capacitor.getPlatform() === "android";
   useEffect(() => {
-    ScreenOrientation.lock({ orientation: 'portrait' }).catch(() => {});
+    ScreenOrientation.lock({ orientation: "portrait" }).catch(() => {});
   }, []);
-
-  const navItems = [
-    { id: 'home', icon: '🏠', label: '首頁' },
-    { id: 'recognize', icon: '🚌', label: '辨識' },
-    { id: 'logs', icon: '📋', label: '辨識紀錄' },
+  const items = [
+    { id: "recognize", icon: ScanLine, label: "辨識" },
+    { id: "nearby", icon: BusFront, label: "公車查詢" },
+    { id: "logs", icon: History, label: "辨識紀錄" },
   ];
-
   return (
     <div className="bv-shell">
+      <header className="brand-header">
+        <ScanLine size={25} />
+        <strong>
+          BUS<span>VISION</span>
+        </strong>
+        <small>公車路線辨識器</small>
+      </header>
       <main className="bv-main">
-        {mode === 'home' && (
-          <section className="bv-home">
-            <div className="bv-home-card">
-              <div className="bv-maid-avatar">🚌</div>
-              <h1>BusVision 辨識器</h1>
-              <p>穩定版介面：只保留立即辨識、拍照辨識、匯入圖片、自動辨識四個核心功能。相機會在需要時自動準備，不另外放啟用相機按鈕。</p>
-              <button className="primary" onClick={() => setMode('recognize')}>進入即時辨識</button>
-              <button onClick={() => setMode('logs')}>查看辨識紀錄</button>
-            </div>
-          </section>
+        {mode === "recognize" && <Recorder autoStartOnEntry={autoStartOnEntry} />}
+        {mode === "nearby" && (
+          <NearbyBuses onStartRecognition={() => setMode("recognize")} />
         )}
-        {mode === 'recognize' && <Recorder />}
-        {mode === 'logs' && <RecognitionLogs />}
+        {mode === "logs" && <RecognitionLogs />}
       </main>
       <nav className="bv-nav" aria-label="主要功能">
-        {navItems.map((it) => (
-          <button key={it.id} onClick={() => setMode(it.id)} className={mode === it.id ? 'active' : ''}>
-            <span className="icon">{it.icon}</span>
-            <span>{it.label}</span>
+        {items.map(({ id, icon: Icon, label }) => (
+          <button
+            key={id}
+            onClick={() => setMode(id)}
+            className={mode === id ? "active" : ""}
+            aria-current={mode === id ? "page" : undefined}
+          >
+            <Icon size={22} />
+            <span>{label}</span>
           </button>
         ))}
       </nav>
     </div>
   );
 }
-
-export default App;

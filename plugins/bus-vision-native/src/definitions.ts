@@ -1,4 +1,5 @@
 export interface BusVisionNativePlugin {
+  recognizeText(options: { image: string }): Promise<{ lines: Array<{text: string; confidence: number; x: number; y: number; w: number; h: number}>; width: number; height: number; engine: string; elapsedMs: number }>;
   ensurePermissions(): Promise<{ ok?: boolean; camera: string; mic?: string; microphone?: string }>
   startCamera(): Promise<{ ok?: boolean }>
   stopCamera(): Promise<{ ok?: boolean }>

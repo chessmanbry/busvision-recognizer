@@ -1,0 +1,282 @@
+{
+  "updatedAt": "2026-11-14",
+  "source": "https://tcgbusfs.blob.core.windows.net/ntpcbus/",
+  "routes": [
+    {
+      "id": "17519",
+      "name": "916",
+      "departure": "三峽",
+      "destination": "捷運永寧站",
+      "officialId": "0400091600",
+      "stops": [
+        {
+          "id": "178760",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路103號同向(向南)"
+        },
+        {
+          "id": "178761",
+          "name": "臺北大學正門",
+          "direction": "0",
+          "address": "臺北大學正門(向南)"
+        },
+        {
+          "id": "178765",
+          "name": "臺北大學宿舍",
+          "direction": "0",
+          "address": "新北市三峽區國慶路宿舍旁"
+        },
+        {
+          "id": "178778",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向北)"
+        },
+        {
+          "id": "178779",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        }
+      ]
+    },
+    {
+      "id": "16664",
+      "name": "921",
+      "departure": "三峽",
+      "destination": "捷運景安站",
+      "officialId": "0400092100",
+      "stops": [
+        {
+          "id": "147439",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路103號同向(向南)"
+        },
+        {
+          "id": "147440",
+          "name": "臺北大學正門",
+          "direction": "0",
+          "address": "臺北大學正門(向南)"
+        },
+        {
+          "id": "147444",
+          "name": "臺北大學宿舍",
+          "direction": "0",
+          "address": "新北市三峽區國慶路宿舍旁"
+        },
+        {
+          "id": "147467",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向北)"
+        },
+        {
+          "id": "147468",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        }
+      ]
+    },
+    {
+      "id": "16224",
+      "name": "922",
+      "departure": "三峽北大社區",
+      "destination": "捷運永寧站",
+      "officialId": "0400092200",
+      "stops": [
+        {
+          "id": "120512",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路103號同向(向南)"
+        },
+        {
+          "id": "120531",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        },
+        {
+          "id": "185525",
+          "name": "大學學勤路口",
+          "direction": "0",
+          "address": "三峽區大學路正門口對面100公尺旁(向西)"
+        },
+        {
+          "id": "191141",
+          "name": "大學學勤路口",
+          "direction": "1",
+          "address": "三峽區大學路正門口對面100公尺旁(向東)"
+        }
+      ]
+    },
+    {
+      "id": "16560",
+      "name": "932",
+      "departure": "三峽北大社區",
+      "destination": "新北板橋公車站",
+      "officialId": "0400093200",
+      "stops": [
+        {
+          "id": "134879",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路103號同向(向南)"
+        },
+        {
+          "id": "134880",
+          "name": "臺北大學正門",
+          "direction": "0",
+          "address": "臺北大學正門(向南)"
+        },
+        {
+          "id": "134884",
+          "name": "臺北大學宿舍",
+          "direction": "0",
+          "address": "新北市三峽區國慶路宿舍旁"
+        },
+        {
+          "id": "134904",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向北)"
+        },
+        {
+          "id": "134905",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        }
+      ]
+    },
+    {
+      "id": "16635",
+      "name": "939",
+      "departure": "三峽",
+      "destination": "臺北市政府",
+      "officialId": "0400093900",
+      "stops": [
+        {
+          "id": "142900",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        },
+        {
+          "id": "142901",
+          "name": "臺北大學正門",
+          "direction": "0",
+          "address": "臺北大學正門(向北)"
+        },
+        {
+          "id": "142944",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向南)"
+        },
+        {
+          "id": "142945",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路103號同向(向南)"
+        }
+      ]
+    },
+    {
+      "id": "16726",
+      "name": "941",
+      "departure": "三峽",
+      "destination": "新店",
+      "officialId": "0400094100",
+      "stops": [
+        {
+          "id": "153423",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        },
+        {
+          "id": "153424",
+          "name": "臺北大學正門",
+          "direction": "0",
+          "address": "臺北大學正門(向北)"
+        },
+        {
+          "id": "153454",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向南)"
+        },
+        {
+          "id": "153455",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路103號同向(向南)"
+        },
+        {
+          "id": "212783",
+          "name": "臺北大學宿舍",
+          "direction": "1",
+          "address": "新北市三峽區國慶路宿舍旁(向南)"
+        }
+      ]
+    },
+    {
+      "id": "16759",
+      "name": "943",
+      "departure": "三峽",
+      "destination": "臺北大學(臺北校區)",
+      "officialId": "0400094300",
+      "stops": [
+        {
+          "id": "156236",
+          "name": "大學學勤路口",
+          "direction": "0",
+          "address": "三峽區大學路正門口對面100公尺旁(向西)"
+        },
+        {
+          "id": "156263",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向南)"
+        }
+      ]
+    },
+    {
+      "id": "16606",
+      "name": "981",
+      "departure": "北大社區",
+      "destination": "鶯歌",
+      "officialId": "0410098100",
+      "stops": [
+        {
+          "id": "140212",
+          "name": "臺北大學正門",
+          "direction": "0",
+          "address": "臺北大學正門(向南)"
+        },
+        {
+          "id": "140213",
+          "name": "學勤路",
+          "direction": "0",
+          "address": "學勤路103號同向(向南)"
+        },
+        {
+          "id": "204733",
+          "name": "臺北大學正門",
+          "direction": "1",
+          "address": "臺北大學正門(向北)"
+        },
+        {
+          "id": "204734",
+          "name": "學勤路",
+          "direction": "1",
+          "address": "學勤路大德路旁約30公尺(向北)"
+        }
+      ]
+    }
+  ]
+}

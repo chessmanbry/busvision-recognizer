@@ -1,0 +1,47 @@
+[
+  {
+    "file": "route-605.jpg",
+    "title": "CSBus605 528FL Front.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:CSBus605_528FL_Front.jpg",
+    "downloadUrl": "https://upload.wikimedia.org/wikipedia/commons/a/a7/CSBus605_528FL_Front.jpg",
+    "author": "Rico Shen",
+    "license": "CC BY-SA 3.0",
+    "licenseUrl": "http://creativecommons.org/licenses/by-sa/3.0/",
+    "width": 3072,
+    "height": 2304,
+    "sha256": "8171cd9d3601a0b1f65c7e58ee2f4df70d218e5284359489b79f85a18cb56985",
+    "expectedRoute": "605",
+    "reviewStatus": "Visually read from destination display by assistant on 2026-11-14; not independently double-annotated",
+    "modifications": "None; original bytes downloaded from Wikimedia Commons"
+  },
+  {
+    "file": "route-208.jpg",
+    "title": "CSGB-CNBus 208 533FL Front.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:CSGB-CNBus_208_533FL_Front.jpg",
+    "downloadUrl": "https://upload.wikimedia.org/wikipedia/commons/8/87/CSGB-CNBus_208_533FL_Front.jpg",
+    "author": "Sap32aaa",
+    "license": "CC BY-SA 3.0",
+    "licenseUrl": "http://creativecommons.org/licenses/by-sa/3.0/",
+    "width": 614,
+    "height": 461,
+    "sha256": "202419666e810a37340f1715195b79c1defb6b1952d8bd13447e5fa9e240ed75",
+    "expectedRoute": "208",
+    "reviewStatus": "Visually read from destination display by assistant on 2026-11-14; not independently double-annotated",
+    "modifications": "None; original bytes downloaded from Wikimedia Commons"
+  },
+  {
+    "file": "route-red2.jpg",
+    "title": "CSGB-GHBus R2 687AD Front.jpg",
+    "source": "https://commons.wikimedia.org/wiki/File:CSGB-GHBus_R2_687AD_Front.jpg",
+    "downloadUrl": "https://upload.wikimedia.org/wikipedia/commons/7/79/CSGB-GHBus_R2_687AD_Front.jpg",
+    "author": "Sap32aaa, and fix watermark by Rico Shen.",
+    "license": "CC BY-SA 3.0",
+    "licenseUrl": "http://creativecommons.org/licenses/by-sa/3.0/",
+    "width": 508,
+    "height": 371,
+    "sha256": "31643c4270c9f192035b3c4ceb7756219c8c8cdfe41ea1c33e90bed942b3bdfa",
+    "expectedRoute": "紅2",
+    "reviewStatus": "Visually read from destination display by assistant on 2026-11-14; not independently double-annotated",
+    "modifications": "None; original bytes downloaded from Wikimedia Commons"
+  }
+]

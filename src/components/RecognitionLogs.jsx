@@ -2,32 +2,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Capacitor } from '@capacitor/core';
 import { Share } from '@capacitor/share';
+import { readLogs, updateLog, clearLogs as clearStoredLogs } from '../services/recognitionStorage.js';
+
+import { readRecognitionTelemetry } from '../services/recognitionTelemetry.js';
 
 const FOLDER_NAME = 'BusData';
-const LOG_FILE = `${FOLDER_NAME}/recognition_logs.json`;
 const DIAGNOSTIC_IMAGE_LIMIT = 12;
-const DIAGNOSTIC_EXPORT_VERSION = '2.0.0.1.4.16';
-
-async function ensureDir() {
-  try {
-    await Filesystem.stat({ path: FOLDER_NAME, directory: Directory.Data });
-  } catch (_) {
-    try { await Filesystem.mkdir({ path: FOLDER_NAME, directory: Directory.Data, recursive: true }); } catch (_) {}
-  }
-}
-
-async function readLogs() {
-  try {
-    const res = await Filesystem.readFile({ path: LOG_FILE, directory: Directory.Data, encoding: Encoding.UTF8 });
-    const arr = JSON.parse(res.data || '[]');
-    return Array.isArray(arr) ? arr : [];
-  } catch (_) { return []; }
-}
-
-async function writeLogs(items) {
-  await ensureDir();
-  await Filesystem.writeFile({ path: LOG_FILE, directory: Directory.Data, encoding: Encoding.UTF8, data: JSON.stringify(items, null, 2) });
-}
+const DIAGNOSTIC_EXPORT_VERSION = '2.0.0-rc.31';
 
 async function toSrc(path) {
   if (!path) return '';
@@ -56,6 +37,9 @@ function compactLogForDiagnostics(item) {
     correctedRouteNumber: item.correctedRouteNumber,
     source: item.source,
     confidence: item.confidence,
+    ocrConfidence: item.ocrConfidence ?? null,
+    timings: item.timings || null,
+    searchSource: item.searchSource || null,
     frameWidth: item.frameWidth || item.imageWidth || null,
     frameHeight: item.frameHeight || item.imageHeight || null,
     imagePath: item.imagePath,
@@ -75,16 +59,32 @@ export default function RecognitionLogs() {
   const [query, setQuery] = useState('');
   const [editing, setEditing] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [error, setError] = useState('');
 
   const load = async () => {
     setLoading(true);
-    const data = await readLogs();
-    data.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
-    setLogs(data);
-    setLoading(false);
+    try {
+      const data = await readLogs();
+      setLogs(data.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)));
+      setError('');
+    } catch (error) {
+      setError(`讀取紀錄失敗：${error?.message || error}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    let active = true;
+    readLogs().then((data) => {
+      if (active) setLogs(data.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)));
+    }).catch((error) => {
+      if (active) setError(`讀取紀錄失敗：${error?.message || error}`);
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
 
   const filtered = useMemo(() => {
     const q = query.trim();
@@ -94,21 +94,29 @@ export default function RecognitionLogs() {
 
   const saveCorrection = async () => {
     if (!editing) return;
-    const next = logs.map((it) => it.id === editing.id ? { ...it, correctedRouteNumber: editing.correctedRouteNumber || '', isConfirmed: true } : it);
-    await writeLogs(next);
-    setEditing(null);
-    setLogs(next.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)));
+    try {
+      const next = await updateLog(editing.id, { correctedRouteNumber: editing.correctedRouteNumber || '', isConfirmed: true });
+      setEditing(null);
+      setLogs(next.sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)));
+      setError('');
+    } catch (error) {
+      setError(`修正紀錄失敗：${error?.message || error}`);
+    }
   };
 
   const clearLogs = async () => {
     const ok = window.confirm('確定清空辨識紀錄？圖片檔案仍會保留在 App 資料夾內。');
     if (!ok) return;
-    await writeLogs([]);
-    setLogs([]);
+    try {
+      await clearStoredLogs();
+      setLogs([]);
+      setError('');
+    } catch (error) {
+      setError(`清空紀錄失敗：${error?.message || error}`);
+    }
   };
 
   const exportLogs = async () => {
-    await ensureDir();
     const sorted = [...logs].sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
     const withImages = sorted.slice(0, DIAGNOSTIC_IMAGE_LIMIT);
     const imageBundles = [];
@@ -129,6 +137,7 @@ export default function RecognitionLogs() {
     const payload = {
       exportType: 'busvision-recognition-diagnostics',
       exportVersion: DIAGNOSTIC_EXPORT_VERSION,
+      recognitionAttempts: readRecognitionTelemetry(),
       exportedAt: new Date().toISOString(),
       note: '此檔案包含辨識紀錄、候選框座標、OCR 原文，以及最近紀錄的完整影像與裁切影像 base64，供演算法除錯使用。',
       summary: {
@@ -142,11 +151,11 @@ export default function RecognitionLogs() {
     };
 
     const filename = `recognition_diagnostic_export_${Date.now()}.json`;
-    await Filesystem.writeFile({ path: `${FOLDER_NAME}/${filename}`, directory: Directory.Data, encoding: Encoding.UTF8, data: JSON.stringify(payload, null, 2) });
+    await Filesystem.writeFile({ path: `${FOLDER_NAME}/${filename}`, directory: Directory.Data, encoding: Encoding.UTF8, data: JSON.stringify(payload, null, 2), recursive: true });
     try {
       const uri = await Filesystem.getUri({ directory: Directory.Data, path: `${FOLDER_NAME}/${filename}` });
       await Share.share({ title: 'BusVision 除錯資料包', text: 'BusVision recognition diagnostics with frame/crop images', url: uri.uri, dialogTitle: '匯出除錯資料包' });
-    } catch (_) {
+    } catch {
       alert(`已匯出除錯資料包：${filename}`);
     }
   };
@@ -180,17 +189,18 @@ export default function RecognitionLogs() {
         </div>
         <button className="bv-small-btn" onClick={load}>重新整理</button>
       </header>
+      {error && <p role="alert">{error}</p>}
 
       <div className="bv-log-tools">
         <input aria-label="搜尋路線" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜尋 932 / F512 / OCR 原文" />
-        <button onClick={exportLogs}>匯出除錯資料包</button>
+        <button onClick={() => exportLogs().catch((error) => setError(`匯出紀錄失敗：${error?.message || error}`))}>匯出除錯資料包</button>
         <button className="danger" onClick={clearLogs}>清空</button>
       </div>
 
       <div className="bv-stats-row">
         <div><strong>{logs.length}</strong><span>總紀錄</span></div>
         <div><strong>{logs.filter((x) => x.isConfirmed).length}</strong><span>已修正/確認</span></div>
-        <div><strong>{logs.filter((x) => (x.confidence || 0) >= 0.7).length}</strong><span>高信心</span></div>
+        <div><strong>{logs.filter((x) => (x.confidence || 0) >= 0.7).length}</strong><span>高分候選</span></div>
       </div>
 
       {loading ? <div className="bv-empty">讀取中...</div> : filtered.length === 0 ? <div className="bv-empty">目前沒有辨識紀錄。</div> : (
@@ -202,11 +212,11 @@ export default function RecognitionLogs() {
                 <div className="bv-log-meta">
                   <div className="time">{it.createdAt || ''}</div>
                   <div>OCR：{it.ocrRawText || '—'}</div>
-                  <div>信心：{Math.round((it.confidence || 0) * 100)}%　來源：{it.source || 'auto'}</div>
+                  <div>規則分數：{Math.round((it.confidence || 0) * 100)} / 100 來源：{it.source || 'auto'}</div>
                 </div>
               </div>
               <div className="bv-log-actions">
-                <button onClick={() => openPreview(it)}>看裁切</button>
+                <button onClick={() => openPreview(it).catch((error) => setError(`讀取圖片失敗：${error?.message || error}`))}>看裁切</button>
                 <button onClick={() => setEditing({ ...it, correctedRouteNumber: it.correctedRouteNumber || it.routeNumber || '' })}>修正</button>
               </div>
             </article>

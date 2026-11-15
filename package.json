@@ -1,16 +1,21 @@
 {
   "name": "bus-vision-recognizer-precision-roi",
   "private": true,
-  "version": "2.0.0.1.4.24",
+  "version": "2.0.0-rc.31",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.js",
+    "ios:sync": "npm run build && cap sync ios",
+    "ios:open": "cap open ios",
+    "android:sync": "npm run build && cap sync android",
+    "test:android": "node scripts/test-android-device.mjs"
   },
   "dependencies": {
-    "@capacitor-community/text-to-speech": "^6.1.0",
+    "@capacitor-community/text-to-speech": "^8.0.2",
     "@capacitor/android": "^8.0.1",
     "@capacitor/app": "^8.0.0",
     "@capacitor/camera": "^8.0.0",
@@ -20,6 +25,7 @@
     "@capacitor/filesystem": "^8.1.0",
     "@capacitor/geolocation": "^8.0.0",
     "@capacitor/haptics": "^8.0.0",
+    "@capacitor/ios": "^8.4.0",
     "@capacitor/keyboard": "^8.0.0",
     "@capacitor/network": "^8.0.0",
     "@capacitor/preferences": "^8.0.0",
@@ -31,6 +37,7 @@
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-webgl": "^4.22.0",
     "bus-vision-native": "file:plugins/bus-vision-native",
+    "fflate": "^0.8.3",
     "lucide-react": "^0.562.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

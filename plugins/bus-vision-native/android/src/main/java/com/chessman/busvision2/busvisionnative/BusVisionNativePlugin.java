@@ -25,6 +25,54 @@ import com.getcapacitor.annotation.PermissionCallback;
 public class BusVisionNativePlugin extends Plugin {
 
   private NativeCameraHost host;
+  private final java.util.concurrent.atomic.AtomicBoolean ocrBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
+  private com.google.mlkit.vision.text.TextRecognizer textRecognizer;
+
+  @PluginMethod
+  public void recognizeText(PluginCall call) {
+    String data = call.getString("image");
+    if (data == null || data.length() > 16000000) { call.reject("Invalid OCR image"); return; }
+    if (!ocrBusy.compareAndSet(false, true)) { call.reject("OCR_BUSY"); return; }
+    final long started = android.os.SystemClock.elapsedRealtime();
+    android.graphics.Bitmap bitmap;
+    try {
+      int comma = data.indexOf(',');
+      byte[] bytes = android.util.Base64.decode(comma >= 0 ? data.substring(comma + 1) : data, android.util.Base64.DEFAULT);
+      android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+      bounds.inJustDecodeBounds = true;
+      android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+      if (bounds.outWidth < 1 || bounds.outHeight < 1 || (long)bounds.outWidth * bounds.outHeight > 25000000L) throw new IllegalArgumentException("Invalid image dimensions");
+      android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+      while (Math.max(bounds.outWidth, bounds.outHeight) / Math.max(1, options.inSampleSize) > 2200) options.inSampleSize = Math.max(1, options.inSampleSize) * 2;
+      bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+      if (bitmap == null) throw new IllegalArgumentException("Cannot decode image");
+      if (textRecognizer == null) textRecognizer = com.google.mlkit.vision.text.TextRecognition.getClient(new com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions.Builder().build());
+    } catch (Exception error) { ocrBusy.set(false); call.reject("OCR image preparation failed", error); return; }
+    final android.graphics.Bitmap input = bitmap;
+    textRecognizer.process(com.google.mlkit.vision.common.InputImage.fromBitmap(input, 0))
+      .addOnSuccessListener(result -> {
+        com.getcapacitor.JSArray lines = new com.getcapacitor.JSArray();
+        for (com.google.mlkit.vision.text.Text.TextBlock block : result.getTextBlocks()) {
+          for (com.google.mlkit.vision.text.Text.Line line : block.getLines()) {
+            android.graphics.Rect box = line.getBoundingBox();
+            if (box == null) continue;
+            JSObject row = new JSObject(); row.put("text", line.getText()); row.put("confidence", line.getConfidence());
+            row.put("x", box.left); row.put("y", box.top); row.put("w", box.width()); row.put("h", box.height()); lines.put(row);
+          }
+        }
+        JSObject output = new JSObject(); output.put("lines", lines); output.put("width", input.getWidth()); output.put("height", input.getHeight());
+        output.put("engine", "mlkit-chinese"); output.put("elapsedMs", android.os.SystemClock.elapsedRealtime() - started); call.resolve(output);
+      })
+      .addOnFailureListener(error -> call.reject("Native OCR failed", error))
+      .addOnCompleteListener(task -> { input.recycle(); ocrBusy.set(false); });
+  }
+
+  @Override
+  protected void handleOnDestroy() {
+    if (textRecognizer != null) { textRecognizer.close(); textRecognizer = null; }
+    super.handleOnDestroy();
+  }
+
 
   @Override
   public void load() {

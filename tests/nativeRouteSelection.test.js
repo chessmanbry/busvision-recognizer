@@ -1,0 +1,7 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {literalRouteCandidates,selectNativeRoute} from '../src/services/nativeRouteSelection.js';
+const line=(text,y=100,h=60,confidence=.9)=>({text,x:100,y,w:200,h,confidence});
+test('native route extraction preserves literal digits and Chinese prefixes without 932 guesses',()=>{assert.deepEqual(literalRouteCandidates('Jhonghe208Dazhi'),['208']);assert.deepEqual(literalRouteCandidates('紅 2'),['紅2']);assert.deepEqual(literalRouteCandidates('F123'),['F123']);assert.deepEqual(literalRouteCandidates('1921'),['1921']);assert.deepEqual(literalRouteCandidates('QZH'),[]);assert.deepEqual(literalRouteCandidates('S32'),[]);});
+test('license plates and phone numbers are not bus routes',()=>{for(const s of ['533-FL','KKA-1234','02-23456789'])assert.deepEqual(literalRouteCandidates(s),[]);});
+test('native selection rejects conflicting routes and uses station context without rewriting',()=>{assert.equal(selectNativeRoute([line('208')],1000,1000,null).reliable,true);assert.equal(selectNativeRoute([line('208'),line('605')],1000,1000,null).reliable,false);const r=selectNativeRoute([line('332')],1000,1000,{routes:['932']});assert.equal(r.best,undefined);assert.deepEqual(r.rejected,['332']);});
+test('unreadable or low-confidence text remains tentative',()=>{assert.equal(selectNativeRoute([line('208',100,60,.1)],1000,1000,null).reliable,false);assert.equal(selectNativeRoute([line('533',850)],1000,1000,null).best,undefined);});
