@@ -1,4 +1,4 @@
-import { ScanLine, Camera as CameraIcon, ImagePlus, Play, Pause } from 'lucide-react';
+import { ScanLine, Camera as CameraIcon, ImagePlus, Play, Pause, ChevronDown, LocateFixed } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import '@tensorflow/tfjs-backend-webgl';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -6,6 +6,9 @@ import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { App } from '@capacitor/app';
+import { Capacitor } from '@capacitor/core';
+import { locateNearbyStation } from '../services/stationLocation.js';
+import { readGpsStation, setGpsStation } from '../services/nearbyStation.js';
 import { getOcrDimensions } from '../services/ocrSizing.js';
 import { recordRecognitionTelemetry } from '../services/recognitionTelemetry.js';
 import { appendLog } from '../services/recognitionStorage.js';
@@ -18,6 +21,7 @@ import { createVehicleDetector } from './vehicleDetector.js';
 import {readRecognitionContext,clearRecognitionContext,routeMatchesContext} from '../services/recognitionContext.js';
 
 const FOLDER_NAME = 'BusData';
+const APP_VOICE_KEY = 'busvision.appVoiceOff';
 const AUTO_INTERVAL_MS = 6500;
 const AUTO_CONFIRM_INTERVAL_MS = 500;
 const VEHICLE_MIN_BUS_SCORE = 0.38;
@@ -565,16 +569,31 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const stableRef = useRef({ route: '', count: 0 });
   const vehicleDetectorRef = useRef(null);
   const vehicleEnabledRef = useRef(false);
-  const mutedRef = useRef(false);
   const mirrorRef = useRef(false);
 
   const [status, setStatus] = useState('對準公車車頭後辨識，或拍照、匯入照片。');
+  const [announcement, setAnnouncement] = useState('');
   const [engineStatus, setEngineStatus] = useState('號碼牌辨識待命');
   const [running, setRunning] = useState(false);
   const [previewReady, setPreviewReady] = useState(false);
-  const [stationDisplay,setStationDisplay] = useState(()=>readRecognitionContext());
-  useEffect(()=>{const timer=setInterval(()=>setStationDisplay(readRecognitionContext()),10000);return()=>clearInterval(timer);},[]);
-  const [muted, setMuted] = useState(false);
+  const [stationDisplay, setStationDisplay] = useState(() => readRecognitionContext());
+  const [gpsStation, setGpsDisplay] = useState(() => readGpsStation());
+  const [locating, setLocating] = useState(false);
+  const [locationNotice, setLocationNotice] = useState('');
+  const locationBusy = useRef(false);
+  const resumeAfterLocation = useRef(false);
+  const gpsEnabled = Capacitor.getPlatform() === 'android';
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setStationDisplay(readRecognitionContext());
+      setGpsDisplay(readGpsStation());
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const [muted, setMuted] = useState(() => localStorage.getItem(APP_VOICE_KEY) === 'true');
+  const mutedRef = useRef(muted);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [mirrorMode, setMirrorMode] = useState(false);
   const [lastRoute, setLastRoute] = useState('—');
   const [confidence, setConfidence] = useState(0);
@@ -585,6 +604,51 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const [busBox, setBusBox] = useState(null);
   const [debugLines, setDebugLines] = useState([]);
   const [debugOpen, setDebugOpen] = useState(false);
+
+  const reportStatus = (message, announce = true) => {
+    setStatus(message);
+    if (announce) setAnnouncement(message);
+  };
+
+  const locateStation = async () => {
+    if (locationBusy.current) return;
+    locationBusy.current = true;
+    resumeAfterLocation.current = false;
+    setLocating(true);
+    setLocationNotice('');
+    setAnnouncement('');
+    try {
+      const result = await locateNearbyStation();
+      if (!activeRef.current || document.hidden) return;
+      const station = result.kind === 'found' ? result.context : null;
+      setGpsStation(station);
+      setGpsDisplay(station);
+      const messages = {
+        denied: '未取得定位權限。你仍可在公車查詢手動設定站點。',
+        inaccurate: '定位不夠精準，請在戶外重試或手動設定站點。',
+        none: '附近 120 公尺內沒有找到雙北公車站牌。',
+      };
+      const message = station
+        ? `附近站牌：${station.name}，約 ${station.distance} 公尺。${station.ambiguous ? '附近有其他站位，請手動確認方向。' : `本站有 ${station.routes.length} 條行經路線。`}`
+        : messages[result.kind];
+      setAnnouncement(message);
+      if (!station) setLocationNotice(message);
+    } catch {
+      if (!activeRef.current || document.hidden) return;
+      setGpsStation(null);
+      setGpsDisplay(null);
+      const message = '暫時無法取得位置或站牌。請檢查系統定位及網路後再試。';
+      setLocationNotice(message);
+      setAnnouncement(message);
+    } finally {
+      locationBusy.current = false;
+      if (activeRef.current) {
+        setLocating(false);
+        if (resumeAfterLocation.current) startAuto();
+      }
+      resumeAfterLocation.current = false;
+    }
+  };
 
   const pushDebug = (line) => {
     const text = `${new Date().toLocaleTimeString('zh-TW', { hour12: false })} ${line}`;
@@ -626,7 +690,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
     } catch (e) {
       if (request !== cameraRequestRef.current) return;
       console.error(e);
-      setStatus('App 內相機啟用失敗。請改用「拍照辨識」；它會用系統相機拍一張後回到 App 辨識。');
+      reportStatus('無法開啟相機。請檢查相機權限，或從「辨識操作」選擇匯入圖片。');
     }
   };
 
@@ -797,10 +861,11 @@ export default function Recorder({ autoStartOnEntry = false }) {
     if (crop) setLastCrop(crop);
     if (!route) {
       const rawPreview = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 60);
-      setStatus(rawPreview ? `尚未讀到可靠路線號碼；OCR 原文：「${rawPreview}」` : '尚未讀到清楚號碼。可再靠近一點，或改用「拍照辨識」。');
+      reportStatus(rawPreview ? '尚未讀到可靠路線號碼。' : '尚未讀到清楚號碼。可再靠近一點，或改用「拍照辨識」。', source !== 'auto-preview-ocr');
       return;
     }
     setStatus(`已辨識：${route}`);
+    if (mutedRef.current) setAnnouncement(`辨識到 ${route}`);
     const now = Date.now();
     const id = `live_${now}`;
     const imagePath = frame ? `${FOLDER_NAME}/${id}_frame.jpg` : '';
@@ -852,8 +917,10 @@ export default function Recorder({ autoStartOnEntry = false }) {
     const startedAt=performance.now();
     const diagnostic={source,outcome:'cancelled',stage:'native-ocr',attempted:1};
     try {
-      setStatus('正在讀取公車路線號碼…');setEngineStatus('手機原生文字辨識');
-      const context=readRecognitionContext();
+      if (!autoSession) setStatus('正在讀取公車路線號碼…');
+      setEngineStatus('手機原生文字辨識');
+      const context = readRecognitionContext() ||
+        (source.endsWith('preview-ocr') ? readGpsStation() : null);
       const result=await runNativePipeline(dataUrl,{recognize:recognizeNativeText,context,isCurrent});
       diagnostic.attempted=result.attempted;
       if(!isCurrent())return;
@@ -873,7 +940,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
         diagnostic.outcome=selection.rejected.length&&!best?'station-mismatch':best?'unconfirmed':'no-result';
         setLastRoute(best?.route||'—');setConfidence(best?.route?0.5:0);
         if(autoSession)stableRef.current={route:'',count:0};
-        setStatus(best?`疑似 ${best.route}，尚未確認，暫不報讀。請再對準車頭號碼。`:selection.rejected.length?`讀到 ${[...new Set(selection.rejected)].join('、')}，與所選站點不符。可清除站點再試。`:'尚未讀到號碼，請讓車頭路線顯示器清楚出現在畫面內。');
+        reportStatus(best?`疑似 ${best.route}，尚未確認。請再對準車頭號碼。`:selection.rejected.length?'讀到的號碼與所選站點不符。可清除站點再試。':autoSession?'':'請對準車頭號碼再試。', !autoSession);
         return;
       }
       if(autoSession){
@@ -885,7 +952,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       debugLog('recognize-result',{source,route:best.route,...timings});
       await commitResult({route:best.route,raw,score:Math.max(.72,best.score),ocrConfidence:best.ocrConfidence*100,frame:dataUrl,crop,rect,vehicle:null,source,allCandidates:selection.candidates.map(c=>({...c.line,label:c.route,score:c.score})),frameWidth:frame.width,frameHeight:frame.height,timings,isCurrent});
       diagnostic.stage='done';
-    }catch(error){diagnostic.outcome='error';if(isCurrent()){setLastRoute('—');setConfidence(0);setStatus(`辨識暫時無法完成：${String(error?.message||error).slice(0,70)}。請再試一次。`);}debugLog('native-ocr-failed',{message:String(error)});}
+    }catch(error){diagnostic.outcome='error';if(isCurrent()){setLastRoute('—');setConfidence(0);reportStatus('辨識暫時無法完成，請再試一次。', !autoSession);}debugLog('native-ocr-failed',{message:String(error)});}
     finally{diagnostic.totalMs=Math.round(performance.now()-startedAt);recordRecognitionTelemetry(diagnostic);if(isCurrent())setEngineStatus('手機辨識待命');}
   };
 
@@ -1024,10 +1091,10 @@ export default function Recorder({ autoStartOnEntry = false }) {
       }
       diagnostic.stage = 'commit';
       await commitResult({ ...best, score: best.route ? best.score : 0, frame: dataUrl, crop, vehicle, source, allCandidates: panels, frameWidth: canvas.width, frameHeight: canvas.height, timings, isCurrent });
-      if (budgetReached && !best.route && isCurrent()) setStatus('本輪等待已達上限，尚未讀到可靠路線。請靠近號碼牌或換一張照片重試。');
+      if (budgetReached && !best.route && isCurrent()) reportStatus('本輪等待已達上限，尚未讀到可靠路線。請靠近號碼牌或換一張照片重試。', !autoSession);
       if (!best.route && rejectedRoutes.size && isCurrent()) {
         diagnostic.outcome='station-mismatch';
-        setStatus(`讀到 ${[...rejectedRoutes].join('、')}，與「${stationContext.name}」行經路線不符，暫不報讀。請核對站點或清除站點重試。`);
+        reportStatus(`讀到的號碼與「${stationContext.name}」行經路線不符。請核對站點或清除站點重試。`, !autoSession);
       }
       if (budgetReached && isCurrent()) setEngineStatus('本輪辨識已結束');
       diagnostic.stage = 'done';
@@ -1037,7 +1104,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       if (isCurrent()) {
         if (autoSession) stableRef.current = { route: '', count: 0 };
         setEngineStatus('辨識暫時無法完成');
-        setStatus(`辨識失敗：${String(e?.message || e).slice(0, 70)}`);
+        reportStatus('辨識失敗，請再試一次。', !autoSession);
       }
     } finally {
       diagnostic.totalMs = performance.now() - startedAt;
@@ -1060,7 +1127,12 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const detectOnce = async (autoSession = null) => {
     const scan = { cancelled: false };
     const isCurrent = () => activeRef.current && !scan.cancelled && !photoActionRef.current && (!autoSession || autoRef.current === autoSession);
-    if (!isCurrent() || liveScanRef.current || recognitionRef.current) return;
+    if (!isCurrent()) return;
+    if (liveScanRef.current || recognitionRef.current) {
+      if (!autoSession) reportStatus('正在辨識，請稍候。');
+      return;
+    }
+    if (!autoSession) setAnnouncement('');
     liveScanRef.current = scan;
     try {
       const v0 = videoRef.current;
@@ -1081,7 +1153,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       if (!isCurrent()) return;
       const source = autoSession ? 'auto-preview-ocr' : 'preview-ocr';
       pushDebug('立即辨識：App 預覽 → 文字方塊定位 → 數字 OCR');
-      setStatus('正在從 App 內相機預覽擷取畫面...');
+      if (!autoSession) setStatus('正在擷取畫面…');
       const dataUrl = await captureFromVideo();
       if (!isCurrent()) return;
       return await recognizeDataUrl(dataUrl, source, autoSession, isCurrent);
@@ -1094,7 +1166,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       }
       debugLog('detect-once-failed', { message: String(e?.message || e) });
       pushDebug(`立即辨識失敗：${String(e?.message || e).slice(0, 55)}`);
-      setStatus(`立即辨識抓不到 App 內預覽畫面：${String(e?.message || e).slice(0, 60)}。這次不會自動開系統相機；請手動按「拍照辨識」作備援。`);
+      reportStatus('無法取得相機畫面。可從「辨識操作」選擇拍照或匯入圖片。');
     } finally {
       liveScanRef.current = null;
     }
@@ -1103,6 +1175,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const recognizePhoto = async (readPhoto, source, label) => {
     if (!activeRef.current || photoActionRef.current) return;
     photoActionRef.current = true;
+    setAnnouncement('');
     if (liveScanRef.current) liveScanRef.current.cancelled = true;
     const isCurrent = () => activeRef.current;
     stopAuto();
@@ -1118,7 +1191,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       await recognizeDataUrl(dataUrl, source, null, isCurrent);
     } catch (e) {
       debugLog('photo-acquisition-failed', { source, message: String(e?.message || e) });
-      if (isCurrent()) setStatus(`${label}取消或失敗：${String(e?.message || e).slice(0, 70)}`);
+      if (isCurrent()) reportStatus(`${label}已取消或無法完成。`);
     } finally {
       photoActionRef.current = false;
     }
@@ -1153,6 +1226,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const toggleMute = () => {
     mutedRef.current = !mutedRef.current;
     setMuted(mutedRef.current);
+    localStorage.setItem(APP_VOICE_KEY, String(mutedRef.current));
     if (mutedRef.current) {
       void TextToSpeech.stop().catch(() => {});
       window.speechSynthesis?.cancel();
@@ -1170,7 +1244,10 @@ export default function Recorder({ autoStartOnEntry = false }) {
     const pausePreview = () => {
       if (!activeRef.current) return;
       if (liveScanRef.current) liveScanRef.current.cancelled = true;
-      if (autoRef.current) stopAuto();
+      if (autoRef.current) {
+        if (locationBusy.current) resumeAfterLocation.current = true;
+        stopAuto();
+      }
       stopCamera();
       void TextToSpeech.stop().catch(() => {});
       window.speechSynthesis?.cancel();
@@ -1197,58 +1274,94 @@ export default function Recorder({ autoStartOnEntry = false }) {
 
   return (
     <div className="bv-recognizer">
-      <video ref={videoRef} autoPlay playsInline muted onPlaying={() => setPreviewReady(true)} className={`bv-video ${previewReady ? 'ready' : ''}`} style={{ transform: mirrorMode ? 'scaleX(-1)' : 'none' }} />
+      <video ref={videoRef} autoPlay playsInline muted aria-hidden="true" tabIndex={-1}
+        onPlaying={() => setPreviewReady(true)}
+        className={`bv-video ${previewReady ? 'ready' : ''}`}
+        style={{ transform: mirrorMode ? 'scaleX(-1)' : 'none' }} />
+      <div className="bv-aim-guide" aria-hidden="true" />
+      <div className="bv-sr-only" role="status" aria-atomic="true">{announcement}</div>
 
       <div className="bv-overlay">
         <header className="bv-rec-header">
-          <div className="bv-pill">{engineStatus}</div>
+          <div className="bv-station-location">
+            {gpsEnabled ? (
+              <button type="button" className="bv-chip bv-location-toggle" aria-disabled={locating}
+                aria-label={locating ? '正在尋找附近站牌' : gpsStation ? `附近站牌 ${gpsStation.name}，更新位置` : '定位附近站牌'}
+                onClick={locateStation}>
+                <LocateFixed size={17} aria-hidden="true" />
+                <span>{locating ? '定位中…' : gpsStation?.name || '附近站牌'}</span>
+              </button>
+            ) : <div className="bv-pill">{engineStatus}</div>}
+            {gpsStation && <small>約 {gpsStation.distance} 公尺{gpsStation.ambiguous ? ' · 站位待確認' : ` · ${gpsStation.routes.length} 條路線`}</small>}
+          </div>
           <div className="bv-header-actions">
-            <button hidden={canUseNativeOcr()} onClick={() => loadVehicleDetector(() => activeRef.current)} className={`bv-chip ${vehicleEnabled ? 'active' : ''}`}>{vehicleEnabled ? '車體定位開啟' : '車體定位'}</button>
-            <button onClick={toggleMirror} className="bv-chip">{mirrorMode ? '鏡像開' : '鏡像關'}</button>
-            <button onClick={toggleMute} className="bv-chip">{muted ? '靜音' : '報讀'}</button>
+            {!canUseNativeOcr() && (
+              <button type="button" onClick={() => loadVehicleDetector(() => activeRef.current)}
+                className="bv-chip" aria-pressed={vehicleEnabled}>車體定位</button>
+            )}
+            <button type="button" onClick={toggleMirror} className="bv-chip"
+              aria-label="鏡像" aria-pressed={mirrorMode}>鏡像{mirrorMode ? '開' : '關'}</button>
+            <button type="button" onClick={toggleMute} className="bv-chip"
+              aria-label="App 語音報讀" aria-pressed={!muted} aria-describedby="bv-voice-help">
+              報讀{muted ? '關' : '開'}
+            </button>
+            <span id="bv-voice-help" className="bv-sr-only">
+              關閉 App 語音報讀後，辨識結果由螢幕閱讀器播報。
+            </span>
           </div>
         </header>
 
-        {lastRoute !== '—' && confidence > 0 && (
-          <section className={`bv-result-card floating ${confidence >= 0.72 ? 'high' : 'mid'}`} aria-live="polite">
-            <div className="label">{confidence >= .72 ? '辨識到' : '待確認'}</div>
-            <div className="route">{lastRoute}</div>
-            <div className="confidence">規則分數 {Math.round(confidence * 100)} / 100</div>
-          </section>
-        )}
-
-        <div className="bv-aim-guide"><span>請將公車車頭放在框內</span></div>
-        {busBox && <div className="bv-bus-hint">已定位車輛範圍</div>}
-
-        <div className="bv-status-toast" role="status">{status}</div>
-        {stationDisplay&&<div className="station-context"><span>站點輔助：{stationDisplay.name}<small>{stationDisplay.routes.length} 條行經路線 · 30 分鐘內有效</small></span><button onClick={()=>{clearRecognitionContext();setStationDisplay(null);}}>清除</button></div>}
-
-        <div className={`bv-debug-panel ${debugOpen ? 'open' : 'collapsed'}`}>
-          <button type="button" className="bv-debug-toggle" onClick={() => setDebugOpen((v) => !v)}>
-            {debugOpen ? '收起辨識詳情' : '辨識詳情'}
-          </button>
-          {debugOpen && (
-            <div className="bv-debug-body">
-              <div>{vehicleEnabled ? '已啟用 COCO-SSD 車體偵測' : '拍照及匯入會嘗試 COCO-SSD 車體偵測'}</div>
-              <div>候選區：{candidates.slice(0, 4).map((c) => `${c.label}${Math.round(c.score * 100)}%`).join(' / ') || '尚未分析'}</div>
-              <div>OCR：{rawText ? rawText.replace(/\s+/g, ' ').slice(0, 80) : '—'}</div>
-              {debugLines.map((line, idx) => <div key={idx} className="debug-line">{line}</div>)}
+        <div className="bv-rec-dock">
+          {lastRoute !== '—' && confidence > 0 && (
+            <div className={`bv-result-card ${confidence >= .72 ? 'high' : 'mid'}`}>
+              <span className="label">{confidence >= .72 ? '辨識到' : '待確認'}</span>
+              <strong className="route">{lastRoute}</strong>
             </div>
           )}
-        </div>
-
-        {lastCrop && <img className="bv-crop-preview" src={lastCrop} alt="號碼牌裁切預覽" />}
-
-        <div className="bv-bottom-panel compact-four">
-          <details className="bv-fold-card" open>
-            <summary><span>對準車頭路線號碼</span><b>{running ? '自動辨識中' : '準備辨識'}</b></summary>
-            <div className="bv-control-row main-actions four-actions">
-              <button className="primary" onClick={() => detectOnce()}><ScanLine size={22}/><strong>立即辨識</strong></button>
-              <button onClick={() => recognizePhoto(takePhoto, 'camera-photo-ocr', '拍照辨識')}><CameraIcon size={22}/><strong>拍照辨識</strong></button>
-              <button onClick={() => recognizePhoto(selectPhoto, 'gallery-photo-ocr', '相簿匯入')}><ImagePlus size={22}/><strong>匯入圖片</strong></button>
-              <button onClick={running ? stopAuto : startAuto}>{running ? <Pause size={22}/> : <Play size={22}/>}<strong>{running ? '暫停自動' : '自動辨識'}</strong></button>
+          {locationNotice && <p className="bv-status-toast">{locationNotice}</p>}
+          {status && <p className="bv-status-toast">{status}</p>}
+          {stationDisplay && (
+            <div className="station-context">
+              <span>站點輔助：{stationDisplay.name}<small>{stationDisplay.routes.length} 條行經路線 · 30 分鐘內有效</small></span>
+              <button type="button" aria-label="清除辨識站點" onClick={() => {
+                clearRecognitionContext();
+                setStationDisplay(null);
+                setAnnouncement('已清除辨識站點。');
+                document.getElementById('bv-actions-toggle')?.focus();
+              }}>清除</button>
             </div>
-          </details>
+          )}
+
+          <div className="bv-rec-controls" role="group" aria-label="辨識控制">
+            <div className="bv-rec-control-head">
+              <button type="button" className="bv-auto-toggle" onClick={running ? stopAuto : startAuto}>
+                {running ? <Pause size={19} aria-hidden="true" /> : <Play size={19} aria-hidden="true" />}
+                {running ? '暫停自動辨識' : '開始自動辨識'}
+              </button>
+              <button type="button" id="bv-actions-toggle" className="bv-actions-toggle"
+                aria-expanded={actionsOpen} aria-controls="bv-rec-actions"
+                onClick={() => setActionsOpen((open) => !open)}>
+                辨識操作 <ChevronDown size={18} aria-hidden="true" />
+              </button>
+            </div>
+            <div id="bv-rec-actions" className="bv-rec-actions" hidden={!actionsOpen}>
+              <div className="bv-rec-action-list">
+                <button type="button" onClick={() => detectOnce()}><ScanLine size={19} aria-hidden="true" />立即辨識</button>
+                <button type="button" onClick={() => recognizePhoto(takePhoto, 'camera-photo-ocr', '拍照辨識')}><CameraIcon size={19} aria-hidden="true" />拍照辨識</button>
+                <button type="button" onClick={() => recognizePhoto(selectPhoto, 'gallery-photo-ocr', '匯入圖片')}><ImagePlus size={19} aria-hidden="true" />匯入圖片</button>
+              </div>
+              <button type="button" className="bv-debug-toggle" aria-expanded={debugOpen}
+                aria-controls="bv-rec-debug" onClick={() => setDebugOpen((open) => !open)}>辨識詳情</button>
+              <div id="bv-rec-debug" className="bv-debug-body" hidden={!debugOpen}>
+                {confidence > 0 && <div>規則分數 {Math.round(confidence * 100)} / 100</div>}
+                {busBox && <div>已定位車輛範圍</div>}
+                <div>候選區：{candidates.slice(0, 4).map((c) => `${c.label}${Math.round(c.score * 100)}%`).join(' / ') || '尚未分析'}</div>
+                <div>辨識原文：{rawText ? rawText.replace(/\s+/g, ' ').slice(0, 80) : '—'}</div>
+                {lastCrop && <img className="bv-crop-preview" src={lastCrop} alt="" />}
+                {debugLines.map((line, idx) => <div key={idx} className="debug-line">{line}</div>)}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>

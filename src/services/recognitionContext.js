@@ -43,12 +43,11 @@ export function routeMatchesContext(route, context) {
   );
 }
 export function sameBoardingStop(raw, selected, sameCity) {
-  if (
-    sameCity &&
-    selected.locationId &&
-    String(raw.stopLocationId) === selected.locationId
-  )
-    return true;
+  const locationId = String(raw.stopLocationId || "");
+  if (sameCity && selected.locationId && selected.locationId !== "0" &&
+      locationId && locationId !== "0") {
+    return locationId === selected.locationId;
+  }
   const lat = Number(raw.latitude),
     lon = Number(raw.longitude);
   return (

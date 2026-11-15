@@ -31,7 +31,8 @@ try {
  for(let i=0;i<2;i++){
   const before=await evaluate(`JSON.parse(localStorage.getItem('busvision.recognition.timings.v1')||'[]').at(-1)?.at||''`);
   const started=Date.now();
-  await evaluate(`(()=>{if(document.visibilityState!=='visible')throw new Error('Keep phone unlocked and BusVision visible');[...document.querySelectorAll('.four-actions button')].find(b=>b.textContent.includes('匯入圖片')).click();})()`);
+  await evaluate(`(()=>{if(document.visibilityState!=='visible')throw new Error('Keep phone unlocked and BusVision visible');const toggle=document.querySelector('#bv-actions-toggle');if(toggle?.getAttribute('aria-expanded')==='false')toggle.click();})()`);
+  await evaluate(`(()=>{[...document.querySelectorAll('.bv-rec-action-list button, .four-actions button')].find(b=>b.textContent.includes('匯入圖片')).click();})()`);
   let result;
   for(let j=0;j<80;j++){await new Promise(r=>setTimeout(r,500));result=await evaluate(`(()=>{const rows=JSON.parse(localStorage.getItem('busvision.recognition.timings.v1')||'[]');return rows.at(-1)?.at!==${JSON.stringify(before)}?{timing:rows.at(-1),status:document.querySelector('.bv-status-toast')?.textContent,route:document.querySelector('.bv-result-card .route')?.textContent}:null;})()`);if(result)break;}
   if(!result)throw new Error('No completed recognition within 40 seconds');

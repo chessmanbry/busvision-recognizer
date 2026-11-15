@@ -42,8 +42,71 @@ async function clickText(text, scope = 'button') {
   const clicked = await evaluate(`(() => { const b = [...document.querySelectorAll(${JSON.stringify(scope)})].find(e => e.textContent.trim().includes(${JSON.stringify(text)})); if (!b || b.disabled) return false; b.click(); return true; })()`);
   if (!clicked) throw new Error(`找不到可操作的按鈕：${text}`);
 }
+async function checkDisclosureAccessibility() {
+  const focusToggle = "document.querySelector('#bv-actions-toggle').focus()";
+  const actionNames = ['立即辨識', '拍照辨識', '匯入圖片'];
+  const actionButtons = async () => {
+    const { nodes } = await cdp('Accessibility.getFullAXTree');
+    return nodes.filter(n => !n.ignored && n.role?.value === 'button' && actionNames.includes(n.name?.value));
+  };
+  check('折疊時隱藏三個次要操作於無障礙樹', (await actionButtons()).length === 0);
+  await evaluate(focusToggle);
+  await cdp('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' });
+  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  check('Enter 展開選單並留在原焦點', await waitFor("document.activeElement.id === 'bv-actions-toggle' && document.activeElement.getAttribute('aria-expanded') === 'true'"));
+  if (await evaluate("document.querySelector('#bv-actions-toggle').getAttribute('aria-expanded') === 'false'")) {
+    await clickText('辨識操作', '#bv-actions-toggle');
+  }
+  const expanded = await actionButtons();
+  const expandedNames = expanded.map(n => n.name.value).join('|');
+  check('展開後無障礙樹依序包含三個有名稱的按鈕', expandedNames === actionNames.join('|'), expandedNames);
+  await evaluate(focusToggle);
+  await cdp('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+  await cdp('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+  check('展開後 Tab 可到第一個操作', await evaluate("document.activeElement.textContent.trim() === '立即辨識'"));
+  check('200% 文字尺寸下操作可捲動到達', await evaluate(`(() => {
+    const root = document.documentElement;
+    const panel = document.querySelector('.bv-overlay');
+    const item = document.querySelector('.bv-debug-toggle');
+    root.style.fontSize = '200%';
+    try {
+      item.scrollIntoView({block:'nearest'});
+      const rect = item.getBoundingClientRect(), bounds = panel.getBoundingClientRect();
+      return panel.scrollWidth <= panel.clientWidth + 1 && rect.top >= bounds.top && rect.bottom <= bounds.bottom + 1;
+    } finally {
+      root.style.fontSize = '';
+      panel.scrollTop = 0;
+    }
+  })()`));
+  await clickText('辨識操作', '#bv-actions-toggle');
+  check('收合後次要操作退出無障礙樹', (await actionButtons()).length === 0);
+}
+async function checkMockLocation() {
+  // Mock only the GPS and permission response. The official station and route feeds stay live.
+  await evaluate(`(() => {
+    window.__bvLocationBridge = window.Capacitor.nativePromise;
+    window.Capacitor.nativePromise = function (plugin, method, args) {
+      if (plugin === 'Geolocation' && method === 'checkPermissions')
+        return Promise.resolve({ location: 'granted', coarseLocation: 'granted' });
+      if (plugin === 'Geolocation' && method === 'getCurrentPosition')
+        return Promise.resolve({ timestamp: Date.now(), coords: { latitude: 24.94489, longitude: 121.37368, accuracy: 3 } });
+      return window.__bvLocationBridge.call(this, plugin, method, args);
+    };
+  })()`);
+  try {
+    await clickText('附近站牌', '.bv-location-toggle');
+    check('模擬 GPS 座標對應官方臺北大學正門站牌',
+      await waitFor("document.querySelector('.bv-location-toggle')?.textContent.includes('臺北大學正門')"));
+    check('附近實體站位載入行經路線數',
+      await waitFor("/[1-9]\\d* 條路線/.test(document.querySelector('.bv-station-location small')?.textContent)"));
+    check('附近站名會通知螢幕閱讀器',
+      await evaluate("document.querySelector('[role=status]')?.textContent.includes('附近站牌：臺北大學正門')"));
+  } finally {
+    await evaluate("window.Capacitor.nativePromise = window.__bvLocationBridge; delete window.__bvLocationBridge; location.reload();");
+  }
+}
 async function checkAutoRecognition(label, since) {
-  check(`${label}開啟相機並進入自動辨識`, await waitFor("document.querySelector('.bv-video.ready')?.videoWidth > 0 && [...document.querySelectorAll('.four-actions button')].some(b => b.textContent.includes('暫停自動'))"));
+  check(`${label}開啟相機並進入自動辨識`, await waitFor("document.querySelector('.bv-video.ready')?.videoWidth > 0 && [...document.querySelectorAll('.bv-auto-toggle')].some(b => b.textContent.includes('暫停自動'))"));
   check(`${label}完成至少一輪影像辨識`, await waitFor(`JSON.parse(localStorage.getItem('busvision.recognition.timings.v1') || '[]').some(r => r.source === 'auto-preview-ocr' && Date.parse(r.at) >= ${since} && !['error','cancelled'].includes(r.outcome))`));
 }
 try {
@@ -92,19 +155,21 @@ try {
     check('直接進入辨識、已移除首頁', await evaluate("!!document.querySelector('.bv-recognizer') && !document.querySelector('.bv-home')"));
     if (args.includes('--expect-auto-start')) {
       await checkAutoRecognition('冷啟動後', launchedAt);
-      await clickText('暫停自動', '.four-actions button');
-      check('可暫停自動辨識', await waitFor("[...document.querySelectorAll('.four-actions button')].some(b => b.textContent === '自動辨識')"));
+      await clickText('暫停自動', '.bv-auto-toggle');
+      check('可暫停自動辨識', await waitFor("[...document.querySelectorAll('.bv-auto-toggle')].some(b => b.textContent.trim() === '開始自動辨識')"));
     }
     await clickText('辨識紀錄', '.bv-nav button');
     check('紀錄頁載入', await waitFor("!!document.querySelector('.bv-log-page') && !document.body.innerText.includes('讀取中')"));
     check('紀錄讀取無錯誤', await evaluate("!document.body.innerText.includes('讀取紀錄失敗')"));
     const returnedFromLogsAt = Date.now();
     await clickText('辨識', '.bv-nav button');
-    check('辨識頁與四個入口', await waitFor("document.querySelectorAll('.four-actions button').length === 4"));
+    check('辨識頁控制已載入', await waitFor("!!document.querySelector('.bv-actions-toggle') && !!document.querySelector('.bv-auto-toggle')"));
     if (args.includes('--expect-auto-start')) await checkAutoRecognition('從紀錄切回辨識後', returnedFromLogsAt);
+    const voicePressed = await evaluate("document.querySelector('[aria-label=\"App 語音報讀\"]').getAttribute('aria-pressed')");
     await clickText('報讀', '.bv-header-actions button');
-    check('靜音切換', await waitFor("[...document.querySelectorAll('.bv-header-actions button')].some(b => b.textContent.includes('靜音'))"));
-    await clickText('靜音', '.bv-header-actions button');
+    check('App 語音報讀有可讀的切換狀態', await evaluate(`document.querySelector('[aria-label="App 語音報讀"]').getAttribute('aria-pressed') !== ${JSON.stringify(voicePressed)}`));
+    await clickText('報讀', '.bv-header-actions button');
+    await checkDisclosureAccessibility();
     await clickText('鏡像關', '.bv-header-actions button');
     check('鏡像切換', await waitFor("[...document.querySelectorAll('.bv-header-actions button')].some(b => b.textContent.includes('鏡像開'))"));
     await clickText('鏡像開', '.bv-header-actions button');
@@ -115,7 +180,7 @@ try {
     await adb('shell', 'am', 'start', '-W', '-n', component);
     check('切背景後恢復', await waitFor("document.visibilityState === 'visible' && !!document.querySelector('.bv-recognizer')"));
     if (args.includes('--expect-auto-start')) {
-      check('回前景維持暫停且釋放相機', await evaluate("!document.querySelector('.bv-video').srcObject && ![...document.querySelectorAll('.four-actions button')].some(b => b.textContent.includes('暫停自動'))"));
+      check('回前景維持暫停且釋放相機', await evaluate("!document.querySelector('.bv-video').srcObject && ![...document.querySelectorAll('.bv-auto-toggle')].some(b => b.textContent.includes('暫停自動'))"));
     }
     await clickText('公車查詢', '.bv-nav button');
     check('北大周邊擴充路線', await waitFor("document.querySelectorAll('.route-picker').length > 8"));
@@ -154,6 +219,7 @@ try {
     const returnedFromQueryAt = Date.now();
     await clickText('辨識','.bv-nav button');
     if (args.includes('--expect-auto-start')) await checkAutoRecognition('從查詢切回辨識後', returnedFromQueryAt);
+    if (args.includes('--mock-location')) await checkMockLocation();
   } else {
     console.log(`開始觀察 ${observe} 秒：請在手機自行操作辨識。腳本不會點按、改路線或清除紀錄。`);
     for (let elapsed = 0; elapsed < observe; elapsed++) { await delay(1000); if ((elapsed + 1) % 10 === 0) console.log(`已觀察 ${elapsed + 1}/${observe} 秒`); }

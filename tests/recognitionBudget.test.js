@@ -10,7 +10,7 @@ async function scenario(firstRoute = '', matches = true) {
  const sandbox = {
   canUseNativeOcr:()=>false,readRecognitionContext:()=>matches?null:{name:'測試站',routes:['932']},routeMatchesContext:()=>matches,
   performance:{now:()=>clock}, RECOGNITION_BUDGET_MS:12000, VEHICLE_STAGE_BUDGET_MS:4000, OCR_TIMEOUT_MS:9000,
-  setStatus:()=>{},setEngineStatus:()=>{},setBusBox:()=>{},setCandidates:()=>{},setLastRoute:()=>{},setConfidence:()=>{},setRawText:()=>{},setLastCrop:()=>{},
+  reportStatus:()=>{},setStatus:()=>{},setEngineStatus:()=>{},setBusBox:()=>{},setCandidates:()=>{},setLastRoute:()=>{},setConfidence:()=>{},setRawText:()=>{},setLastCrop:()=>{},
   canvasFromDataUrl:async()=>({width:1600,height:900}), vehicleEnabledRef:{current:false},
   debugLog:()=>{},centerSearchCrop:()=>({}),cropCanvas:()=>({toDataURL:()=>''}),
   findDemoPanels:()=>Array.from({length:4},()=>({score:.5,kind:'paper'})),mapRect:r=>r,

@@ -20,7 +20,7 @@ export default function App() {
   return (
     <div className="bv-shell">
       <header className="brand-header">
-        <ScanLine size={25} />
+        <ScanLine size={25} aria-hidden="true" />
         <strong>
           BUS<span>VISION</span>
         </strong>
@@ -41,7 +41,7 @@ export default function App() {
             className={mode === id ? "active" : ""}
             aria-current={mode === id ? "page" : undefined}
           >
-            <Icon size={22} />
+            <Icon size={22} aria-hidden="true" />
             <span>{label}</span>
           </button>
         ))}

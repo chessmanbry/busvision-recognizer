@@ -36,6 +36,7 @@ export function literalRouteCandidates(text) {
 }
 export function selectNativeRoute(lines, width, height, context) {
   const candidates = [];
+  const gps = context?.source === "gps";
   for (const line of lines || []) {
     if (
       !Number.isFinite(line.h) ||
@@ -59,12 +60,13 @@ export function selectNativeRoute(lines, width, height, context) {
         route,
         line,
         score,
+        rank: score + (gps && routeMatchesContext(route, context) ? 0.04 : 0),
         ocrConfidence: conf,
-        matches: routeMatchesContext(route, context),
+        matches: gps || routeMatchesContext(route, context),
       });
     }
   }
-  const sorted = candidates.sort((a, b) => b.score - a.score);
+  const sorted = candidates.sort((a, b) => b.rank - a.rank);
   const matching = sorted.filter((c) => c.matches),
     best = matching[0];
   const second = matching.find((c) => c.route !== best?.route);
@@ -72,7 +74,7 @@ export function selectNativeRoute(lines, width, height, context) {
     !!best &&
     best.ocrConfidence >= 0.4 &&
     best.score >= 0.64 &&
-    (!second || best.score - second.score >= 0.07);
+    (!second || best.rank - second.rank >= 0.07);
   return {
     best,
     reliable,
