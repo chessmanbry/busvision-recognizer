@@ -202,8 +202,31 @@ try {
     check('畫面沒有水平溢出',await evaluate("document.documentElement.scrollWidth<=Math.ceil(visualViewport.width)&&document.querySelector('.transit-page').scrollWidth<=Math.ceil(visualViewport.width)"));
     await mkdir(out,{recursive:true});
     const shot=await cdp('Page.captureScreenshot',{format:'png'});await writeFile(path.join(out,'route-detail.png'),Buffer.from(shot.data,'base64'));
+    if (args.includes('--check-waiting')) {
+      await clickText('我要搭這班', '.wait-target-button');
+      check('候車目標帶回辨識', await waitFor("!!document.querySelector('.bv-wait-target')"));
+      const saved = await evaluate("JSON.parse(localStorage.getItem('busvision.waitingTarget.v1'))");
+      check('保存所選路線與返程', saved?.routeName === '932' && saved?.stop.direction === '1');
+      check('候車目標有取消按鈕', await evaluate("document.querySelector('.bv-wait-target button').textContent.includes('取消')"));
+      await clickText('候車與辨識資訊', '.bv-quick button');
+      check('候車資訊彈窗開啟',await waitFor("document.querySelector('.bv-info-dialog').open"));
+      await evaluate("document.querySelector('.bv-info-dialog header button').click()");
+      check('關閉資訊保留目標',await evaluate("!document.querySelector('.bv-info-dialog').open && !!localStorage.getItem('busvision.waitingTarget.v1')"));
+      await evaluate("document.querySelector('.bv-quick button').click()");
+      check('相機切換兩倍取景',await waitFor("document.querySelector('.bv-video').dataset.zoom==='2'"));
+      await clickText('候車與辨識資訊', '.bv-quick button');
+      await clickText('取消候車目標', '.bv-wait-target button');
+      check('可取消候車目標', await waitFor("!document.querySelector('.bv-wait-target') && !localStorage.getItem('busvision.waitingTarget.v1')"));
+      await clickText('公車查詢', '.bv-nav button');
+      await clickText('雙北全部', '.scope-tabs button');
+      await evaluate("(()=>{const input=document.querySelector('.transit-search input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'932');input.dispatchEvent(new Event('input',{bubbles:true}));})()");
+      await waitFor("[...document.querySelectorAll('.route-picker strong')].some(e=>e.textContent==='932')");
+      await evaluate("[...document.querySelectorAll('.route-picker')].find(b=>b.querySelector('strong').textContent==='932').click()");
+      await waitFor("document.querySelectorAll('.stop-timeline li').length>3");
+      await clickText('返程','.route-direction-tabs button');
+    }
     const selectedStationAt = Date.now();
-    await evaluate("[...document.querySelectorAll('.stop-timeline li')].find(e=>e.querySelector('.stop-description>strong')?.textContent==='臺北大學正門').querySelector('.use-stop').click()");
+    await evaluate("[...document.querySelectorAll('.stop-timeline li')].find(e=>e.querySelector('.stop-description>strong')?.textContent==='臺北大學正門').querySelector('.use-stop:not(.wait-target-button)').click()");
     check('站點行經路線帶回辨識',await waitFor("!!document.querySelector('.station-context') && !!document.querySelector('.bv-recognizer')"));
     if (args.includes('--expect-auto-start')) await checkAutoRecognition('設定站點後', selectedStationAt);
     report.stationContext=await evaluate("JSON.parse(localStorage.getItem('busvision.station.context.v1'))");

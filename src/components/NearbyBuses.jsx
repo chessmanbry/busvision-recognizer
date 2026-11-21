@@ -21,7 +21,8 @@ import {
   isFeedFresh,
   selectArrival,
 } from "../services/transitData.js";
-import { saveRecognitionContext } from "../services/recognitionContext.js";
+import { saveRecognitionContext, clearRecognitionContext } from "../services/recognitionContext.js";
+import { saveWaitingTarget } from "../services/waitingTarget.js";
 const cityNames = { taipei: "臺北市", newtaipei: "新北市" };
 const order = new Intl.Collator("zh-Hant", { numeric: true });
 export default function NearbyBuses({ onStartRecognition }) {
@@ -346,6 +347,10 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
                   <span>
                     {i + 1} 站{stop.address ? ` · ${stop.address}` : ""}
                   </span>
+                  <button className="use-stop wait-target-button" onClick={() => { clearRecognitionContext(); saveWaitingTarget(route, stop); onStartRecognition(); }}
+                    aria-label={`等 ${route.name}，往 ${direction === '0' ? route.destination : route.departure}，在 ${stop.name} 上車`}>
+                    我要搭這班
+                  </button>
                   <button
                     className="use-stop"
                     disabled={!!selecting}

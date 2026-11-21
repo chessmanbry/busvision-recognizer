@@ -1,3 +1,5 @@
+import InfoPopup from './InfoPopup.jsx';
+import WaitingAssistant from './WaitingAssistant.jsx';
 import { ScanLine, Camera as CameraIcon, ImagePlus, Play, Pause, ChevronDown, LocateFixed } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import '@tensorflow/tfjs-backend-webgl';
@@ -22,7 +24,7 @@ import {readRecognitionContext,clearRecognitionContext,routeMatchesContext} from
 
 const FOLDER_NAME = 'BusData';
 const APP_VOICE_KEY = 'busvision.appVoiceOff';
-const AUTO_INTERVAL_MS = 6500;
+const AUTO_INTERVAL_MS = 2200;
 const AUTO_CONFIRM_INTERVAL_MS = 500;
 const VEHICLE_MIN_BUS_SCORE = 0.38;
 const VEHICLE_TIMEOUT_MS = 8000;
@@ -158,7 +160,8 @@ function getVisibleCoverSource(video) {
     sh = vw / boxRatio;
     sy = (vh - sh) / 2;
   }
-  return { sx, sy, sw, sh };
+  const zoom = Number(video.dataset.zoom) || 1;
+  return { sx: sx + sw*(1-1/zoom)/2, sy: sy + sh*(1-1/zoom)/2, sw: sw/zoom, sh: sh/zoom };
 }
 function centerSearchCrop(canvas) {
   const W = canvas.width, H = canvas.height;
@@ -557,6 +560,19 @@ function findDemoPanels(canvas) {
 
 export default function Recorder({ autoStartOnEntry = false }) {
   const videoRef = useRef(null);
+  const [zoom, setZoom] = useState(1);
+  const [notice, setNotice] = useState(null);
+  const showNotice = React.useCallback(text => setNotice({text}), []);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), Math.max(8000, Array.from(notice.text).length * 1000));
+    return () => clearTimeout(timer);
+  }, [notice]);
+  const targetResultHandler = useRef(null);
+  const [approaching, setApproaching] = useState(false);
+  const approachingRef = useRef(false);
+  useEffect(() => { approachingRef.current = approaching; }, [approaching]);
+  const [alignmentState, setAlignmentState] = useState("idle");
   const streamRef = useRef(null);
   const cameraRequestRef = useRef(0);
   const autoRef = useRef(null);
@@ -670,7 +686,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
     setStatus('正在啟用 App 內相機...');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
       if (request !== cameraRequestRef.current) {
@@ -710,7 +726,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
     }
     ctx.drawImage(v, visible.sx, visible.sy, visible.sw, visible.sh, 0, 0, c.width, c.height);
     debugLog('capture-video', { videoWidth: v.videoWidth, videoHeight: v.videoHeight, canvasWidth: c.width, canvasHeight: c.height, visible });
-    return c.toDataURL('image/jpeg', 0.86);
+    return c.toDataURL('image/jpeg', 0.92);
   };
 
   const takePhoto = async () => {
@@ -763,7 +779,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       if (!webglReady) await tf.setBackend('cpu');
       await tf.ready();
       const cocoSsd = await import('@tensorflow-models/coco-ssd');
-      return cocoSsd.load({ base: 'lite_mobilenet_v2' });
+      return cocoSsd.load({ base: 'lite_mobilenet_v2', modelUrl: '/models/bus/model.json' });
     });
     const startedAt = performance.now();
     if (!vehicleEnabledRef.current) setEngineStatus('正在載入 COCO-SSD 公車偵測...');
@@ -865,16 +881,18 @@ export default function Recorder({ autoStartOnEntry = false }) {
       return;
     }
     setStatus(`已辨識：${route}`);
-    if (mutedRef.current) setAnnouncement(`辨識到 ${route}`);
+    const targetHandled = targetResultHandler.current?.({route, source, isCurrent});
+    if (!targetHandled && mutedRef.current) setAnnouncement(`辨識到 ${route}`);
     const now = Date.now();
     const id = `live_${now}`;
     const imagePath = frame ? `${FOLDER_NAME}/${id}_frame.jpg` : '';
     const cropPath = crop ? `${FOLDER_NAME}/${id}_crop.jpg` : '';
-    const shouldSpeak = !mutedRef.current && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 5000);
+    if (!targetHandled && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 30000)) showNotice(`辨識到 ${route}`);
+    const shouldSpeak = !targetHandled && !mutedRef.current && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 30000);
     if (shouldSpeak) {
       lastSpokenRef.current = { route, at: now };
       const canSpeak = () => !mutedRef.current && isCurrent();
-      void vibrateOk().then(() => {
+      void (source.endsWith('preview-ocr') || localStorage.getItem('busvision.hapticsOff') === 'true' ? Promise.resolve() : vibrateOk()).then(() => {
         if (canSpeak()) return speak(`辨識到 ${route}`, canSpeak);
       });
     }
@@ -1209,7 +1227,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       if (autoRef.current === session) {
         const delay = scanAgainSoon
           ? AUTO_CONFIRM_INTERVAL_MS
-          : Math.max(AUTO_CONFIRM_INTERVAL_MS, AUTO_INTERVAL_MS - (performance.now() - startedAt));
+          : Math.max(AUTO_CONFIRM_INTERVAL_MS, (approachingRef.current ? 1000 : AUTO_INTERVAL_MS) - (performance.now() - startedAt));
         session.timer = setTimeout(tick, delay);
       }
     };
@@ -1277,8 +1295,8 @@ export default function Recorder({ autoStartOnEntry = false }) {
       <video ref={videoRef} autoPlay playsInline muted aria-hidden="true" tabIndex={-1}
         onPlaying={() => setPreviewReady(true)}
         className={`bv-video ${previewReady ? 'ready' : ''}`}
-        style={{ transform: mirrorMode ? 'scaleX(-1)' : 'none' }} />
-      <div className="bv-aim-guide" aria-hidden="true" />
+        data-zoom={zoom} style={{ transform: `scale(${mirrorMode ? -zoom : zoom}, ${zoom})` }} />
+      <div className={`bv-aim-guide bv-aim-${alignmentState}`} aria-hidden="true" />
       <div className="bv-sr-only" role="status" aria-atomic="true">{announcement}</div>
 
       <div className="bv-overlay">
@@ -1312,6 +1330,10 @@ export default function Recorder({ autoStartOnEntry = false }) {
         </header>
 
         <div className="bv-rec-dock">
+          {notice && <aside className="bv-event"><span>{notice.text}</span><button aria-label="關閉這則提示" onClick={() => setNotice(null)}>×</button></aside>}
+          <div className="bv-quick"><button className="bv-chip" aria-label={`相機倍率 ${zoom} 倍，切換倍率`} onClick={() => setZoom(z => z === 3 ? 1 : z + 1)}>{zoom}× 變焦</button>
+          <InfoPopup><WaitingAssistant showNotice={showNotice} videoRef={videoRef} running={running && previewReady} mutedRef={mutedRef}
+            announce={setAnnouncement} speak={speak} onAligned={setAlignmentState} onApproaching={setApproaching} resultHandlerRef={targetResultHandler} />
           {lastRoute !== '—' && confidence > 0 && (
             <div className={`bv-result-card ${confidence >= .72 ? 'high' : 'mid'}`}>
               <span className="label">{confidence >= .72 ? '辨識到' : '待確認'}</span>
@@ -1332,6 +1354,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
             </div>
           )}
 
+          </InfoPopup></div>
           <div className="bv-rec-controls" role="group" aria-label="辨識控制">
             <div className="bv-rec-control-head">
               <button type="button" className="bv-auto-toggle" onClick={running ? stopAuto : startAuto}>

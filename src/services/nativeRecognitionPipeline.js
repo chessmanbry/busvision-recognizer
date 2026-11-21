@@ -47,11 +47,8 @@ export async function runNativePipeline(
   canvas.height = Math.round(im.height * scale);
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(im, 0, 0, canvas.width, canvas.height);
-  const boxes = findLedRegions(
-    ctx.getImageData(0, 0, canvas.width, canvas.height).data,
-    canvas.width,
-    canvas.height,
-  );
+  const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const boxes = await locateLights(pixels, canvas.width, canvas.height);
   const lines = [...result.lines];
   for (const box of boxes) {
     if (!isCurrent() || performance.now() > deadline - 200) break;
@@ -100,4 +97,19 @@ export async function runNativePipeline(
     // Inspect all shortlisted regions, so competing readable routes remain uncertain.
   }
   return { ...result, lines, selection, attempted };
+}
+
+// Keep bright, densely connected lamps from blocking controls or camera rendering.
+async function locateLights(pixels, width, height) {
+  if (typeof Worker === "undefined") return findLedRegions(pixels, width, height);
+  const worker = new Worker(new URL("./ledRegions.worker.js", import.meta.url), {type:"module"});
+  try {
+    return await new Promise(resolve => {
+      const timer = setTimeout(() => resolve([]), 900);
+      const finish = boxes => { clearTimeout(timer); resolve(boxes); };
+      worker.onmessage = event => finish(event.data);
+      worker.onerror = () => finish([]);
+      worker.postMessage({pixels,width,height}, [pixels.buffer]);
+    });
+  } finally { worker.terminate(); }
 }
