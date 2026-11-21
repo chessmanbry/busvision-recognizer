@@ -1,3 +1,4 @@
+import {isFeedFresh, selectArrival} from "./transitData.js";
 import { sameBoardingStop } from "./recognitionContext.js";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { gunzipSync, strFromU8 } from "fflate";
@@ -111,4 +112,28 @@ export async function loadStationRecognitionContext(city, stop) {
     stopId: stop.id,
     routes,
   };
+}
+
+export async function loadBoardingCandidates(target) {
+  const anchorRows = (await loadTransitFeed(target.city,'stops')).rows;
+  const anchor = anchorRows.find(r=>String(r.Id)===target.stop.id && String(r.routeId)===target.routeId && String(r.goBack)===target.stop.direction);
+  if (!anchor) return null;
+  const stop = {name:anchor.nameZh, locationId:String(anchor.stopLocationId || ''), lat:Number(anchor.latitude), lon:Number(anchor.longitude)};
+  const routes=new Set(), due=new Set();
+  let expires=Infinity;
+  await Promise.all(['taipei','newtaipei'].map(async city=>{
+    const [catalog,stops,arrivals]=await Promise.all(['routes','stops','arrivals'].map(kind=>loadTransitFeed(city,kind)));
+    if (!isFeedFresh(arrivals.updatedAt)) throw Error('stale arrivals');
+    expires=Math.min(expires,arrivals.updatedAt+120000);
+    const names=new Map(catalog.rows.map(r=>[String(r.Id),r.nameZh]));
+    // Direction codes are per route. Match the physical boarding point, then use each stop's own direction.
+    for(const row of stops.rows.filter(r=>sameBoardingStop(r,stop,city===target.city))){
+      const id=String(row.routeId), name=names.get(id);
+      if (!name) throw Error('incomplete station catalog');
+      routes.add(name);
+      const raw=selectArrival(arrivals.rows,id,{id:String(row.Id),direction:String(row.goBack)})?.EstimateTime;
+      if(raw!=null && String(raw).trim() && Number(raw)>=0 && Number(raw)<=180) due.add(name);
+    }
+  }));
+  return {routes:[...routes],due:[...due],expires};
 }

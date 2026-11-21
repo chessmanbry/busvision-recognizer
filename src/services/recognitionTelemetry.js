@@ -10,7 +10,7 @@ export function recordRecognitionTelemetry(record, storage = globalThis.localSto
   try {
     const records = readRecognitionTelemetry(storage);
     const allowed = ['source', 'outcome', 'stage', 'decodeMs', 'vehicleMs', 'roiMs', 'ocrMs', 'ocrSetupMs', 'preprocessMs', 'ocrEngineMs', 'pipelineMs', 'totalMs', 'attempted'];
-    const clean = { at: new Date().toISOString(), version: '2.0.0-rc.36' };
+    const clean = { at: new Date().toISOString(), version: '2.0.0-rc.37' };
     for (const key of allowed) {
       const value = record[key];
       if (typeof value === 'string' && !key.endsWith('Ms')) clean[key] = value.slice(0, 48);

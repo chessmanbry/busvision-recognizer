@@ -6,7 +6,7 @@ const adbPath = process.env.ADB || `${homedir()}/Library/Android/sdk/platform-to
 const serial = process.argv[2];
 const checkReader = process.argv.includes('--check-reader');
 const moving = process.argv.includes('--moving');
-const outputDir = moving ? 'test-results/iteration-rc35/moving' : 'test-results/iteration-rc34';
+const outputDir = moving ? 'test-results/iteration-rc37/moving' : 'test-results/iteration-rc37/still';
 if (!serial) throw new Error('Usage: node scripts/benchmark-public-buses.mjs SERIAL');
 const pkg = 'com.chessman.busvision2.recognizer';
 const adb = (...args) => execFileSync(adbPath, ['-s', serial, ...args], { timeout: 30000, maxBuffer: 12e6 });
@@ -33,7 +33,7 @@ try {
  await evaluate("localStorage.setItem('busvision.hapticsOff','false');localStorage.setItem('busvision.appVoiceOff','false');");
  await evaluate(`localStorage.setItem('busvision.waitingTarget.v1',JSON.stringify({city:'taipei',routeId:'test-unmatched-feed',routeName:'208',destination:'測試方向',stop:{id:'test-stop',name:'測試站',direction:'0'},createdAt:Date.now()}));location.reload();`);
  await new Promise(r=>setTimeout(r,2000));
- await evaluate(`(()=>{window.__draw=CanvasRenderingContext2D.prototype.drawImage;window.__native=Capacitor.nativePromise;window.__cues=[];Capacitor.nativePromise=function(p,m,o){if(p==='TextToSpeech'&&m==='speak'){window.__cues.push({p,text:o.text,at:Date.now()});return Promise.resolve();}if(p==='Haptics'){window.__cues.push({p,at:Date.now()});return Promise.resolve();}if(p==='Filesystem'&&m==='writeFile')return Promise.resolve({uri:'replay-not-saved'});return window.__native.apply(this,arguments);};CanvasRenderingContext2D.prototype.drawImage=function(input,...args){if (input instanceof HTMLVideoElement && window.__image && ${moving}) {
+ await evaluate(`(()=>{window.__draw=CanvasRenderingContext2D.prototype.drawImage;window.__native=Capacitor.nativePromise;window.__cues=[];Capacitor.nativePromise=function(p,m,o){if(p==='BusVisionNative'&&m==='recognizeText'){return window.__native.apply(this,arguments).then(r=>{if(window.__image && window.__inspect){window.__inspect.push({width:r.width,height:r.height,lines:r.lines?.map(l=>[l.text,Math.round(l.confidence*100),Math.round(l.y/r.height*100)])});if(window.__inspect.length>10)window.__inspect.shift();}return r;});}if(p==='TextToSpeech'&&m==='speak'){window.__cues.push({p,text:o.text,at:Date.now()});return Promise.resolve();}if(p==='Haptics'){window.__cues.push({p,at:Date.now()});return Promise.resolve();}if(p==='Filesystem'&&m==='writeFile')return Promise.resolve({uri:'replay-not-saved'});return window.__native.apply(this,arguments);};CanvasRenderingContext2D.prototype.drawImage=function(input,...args){if (input instanceof HTMLVideoElement && window.__image && ${moving}) {
  const c = window.__scene ||= document.createElement('canvas');
  c.width=input.videoWidth;c.height=input.videoHeight;
  const ctx=c.getContext('2d'), w=c.width, h=c.height;
@@ -45,9 +45,9 @@ try {
 } return window.__draw.call(this,input instanceof HTMLVideoElement && window.__image ? window.__image:input,...args);};})()`);
  for(const sample of rows){
   const data=readFileSync('test-assets/public-buses/'+sample.file).toString('base64');
-  await evaluate(`(async()=>{window.__image=new Image();window.__image.src='data:image/jpeg;base64,${data}';await window.__image.decode();const b=document.querySelector('.bv-auto-toggle');if(b?.textContent.includes('開始'))b.click();})()`);
+  await evaluate(`(async()=>{window.__inspect=[];window.__image=new Image();window.__image.src='data:image/jpeg;base64,${data}';await window.__image.decode();const b=document.querySelector('.bv-auto-toggle');if(b?.textContent.includes('開始'))b.click();})()`);
   await new Promise(r=>setTimeout(r,9000));
-  results.push({file:sample.file,...await evaluate(`({alignment:document.querySelector('.bv-alignment-text')?.textContent,guide:document.querySelector('.bv-aim-guide')?.className,cues:window.__cues,route:document.querySelector('.bv-result-card .route')?.textContent})`)});
+  results.push({file:sample.file,...await evaluate(`({alignment:document.querySelector('.bv-alignment-text')?.textContent,guide:document.querySelector('.bv-aim-guide')?.className,inspect:window.__inspect,cues:window.__cues,cropDiagnostics:JSON.parse(localStorage.getItem('busvision.recognition.timings.v1')||'[]').filter(r=>r.source==='bus-crop').slice(-6).map(r=>[r.outcome,r.ocrMs]),route:document.querySelector('.bv-result-card .route')?.textContent})`)});
   console.log(JSON.stringify(results.at(-1)));
   mkdirSync(outputDir,{recursive:true});const shot=await call('Page.captureScreenshot',{format:'png'});writeFileSync(`${outputDir}/alignment-${sample.file}.png`,Buffer.from(shot.data,'base64'));
  }

@@ -8,7 +8,7 @@ import { readRecognitionTelemetry } from '../services/recognitionTelemetry.js';
 
 const FOLDER_NAME = 'BusData';
 const DIAGNOSTIC_IMAGE_LIMIT = 12;
-const DIAGNOSTIC_EXPORT_VERSION = '2.0.0-rc.36';
+const DIAGNOSTIC_EXPORT_VERSION = '2.0.0-rc.37';
 
 async function toSrc(path) {
   if (!path) return '';
