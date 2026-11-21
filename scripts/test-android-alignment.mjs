@@ -5,7 +5,8 @@ import { homedir } from 'node:os';
 const adbPath = process.env.ADB || `${homedir()}/Library/Android/sdk/platform-tools/adb`;
 const serial = process.argv[2];
 const checkReader = process.argv.includes('--check-reader');
-const outputDir = 'test-results/iteration-rc34';
+const moving = process.argv.includes('--moving');
+const outputDir = moving ? 'test-results/iteration-rc35/moving' : 'test-results/iteration-rc34';
 if (!serial) throw new Error('Usage: node scripts/benchmark-public-buses.mjs SERIAL');
 const pkg = 'com.chessman.busvision2.recognizer';
 const adb = (...args) => execFileSync(adbPath, ['-s', serial, ...args], { timeout: 30000, maxBuffer: 12e6 });
@@ -32,7 +33,16 @@ try {
  await evaluate("localStorage.setItem('busvision.hapticsOff','false');localStorage.setItem('busvision.appVoiceOff','false');");
  await evaluate(`localStorage.setItem('busvision.waitingTarget.v1',JSON.stringify({city:'taipei',routeId:'test-unmatched-feed',routeName:'208',destination:'測試方向',stop:{id:'test-stop',name:'測試站',direction:'0'},createdAt:Date.now()}));location.reload();`);
  await new Promise(r=>setTimeout(r,2000));
- await evaluate(`(()=>{window.__draw=CanvasRenderingContext2D.prototype.drawImage;window.__native=Capacitor.nativePromise;window.__cues=[];Capacitor.nativePromise=function(p,m,o){if(p==='TextToSpeech'&&m==='speak'){window.__cues.push({p,text:o.text,at:Date.now()});return Promise.resolve();}if(p==='Haptics'){window.__cues.push({p,at:Date.now()});return Promise.resolve();}if(p==='Filesystem'&&m==='writeFile')return Promise.resolve({uri:'replay-not-saved'});return window.__native.apply(this,arguments);};CanvasRenderingContext2D.prototype.drawImage=function(input,...args){return window.__draw.call(this,input instanceof HTMLVideoElement && window.__image ? window.__image:input,...args);};})()`);
+ await evaluate(`(()=>{window.__draw=CanvasRenderingContext2D.prototype.drawImage;window.__native=Capacitor.nativePromise;window.__cues=[];Capacitor.nativePromise=function(p,m,o){if(p==='TextToSpeech'&&m==='speak'){window.__cues.push({p,text:o.text,at:Date.now()});return Promise.resolve();}if(p==='Haptics'){window.__cues.push({p,at:Date.now()});return Promise.resolve();}if(p==='Filesystem'&&m==='writeFile')return Promise.resolve({uri:'replay-not-saved'});return window.__native.apply(this,arguments);};CanvasRenderingContext2D.prototype.drawImage=function(input,...args){if (input instanceof HTMLVideoElement && window.__image && ${moving}) {
+ const c = window.__scene ||= document.createElement('canvas');
+ c.width=input.videoWidth;c.height=input.videoHeight;
+ const ctx=c.getContext('2d'), w=c.width, h=c.height;
+ const drift=.08*Math.sin(performance.now()/370);
+ ctx.fillStyle='#242831';ctx.fillRect(0,0,w,h);
+ window.__draw.call(ctx,window.__image,w*drift,h*.07,w,h*.86);
+ for(let i=0;i<8;i++){ctx.fillStyle=i%2?'#ff3010':'#fff7c1';ctx.beginPath();ctx.arc(w*(i+.5)/8,h*.85,w*.013,0,7);ctx.fill();}
+ return window.__draw.call(this,c,...args);
+} return window.__draw.call(this,input instanceof HTMLVideoElement && window.__image ? window.__image:input,...args);};})()`);
  for(const sample of rows){
   const data=readFileSync('test-assets/public-buses/'+sample.file).toString('base64');
   await evaluate(`(async()=>{window.__image=new Image();window.__image.src='data:image/jpeg;base64,${data}';await window.__image.decode();const b=document.querySelector('.bv-auto-toggle');if(b?.textContent.includes('開始'))b.click();})()`);
@@ -50,5 +60,5 @@ try {
 }finally{
  if(ws?.readyState===1)await evaluate(`(()=>{if(window.__draw)CanvasRenderingContext2D.prototype.drawImage=window.__draw;if(window.__native)Capacitor.nativePromise=window.__native;delete window.__image;${['hapticsOff','appVoiceOff'].map((key,i)=>{const v=i?globalThis.previousVoice:globalThis.previousHaptics;return v === null ? `localStorage.removeItem('busvision.${key}');` : `localStorage.setItem('busvision.${key}',${JSON.stringify(v)});`;}).join('')}${globalThis.previousTarget ? `localStorage.setItem('busvision.waitingTarget.v1',${JSON.stringify(globalThis.previousTarget)});` : `localStorage.removeItem('busvision.waitingTarget.v1');`}location.reload();})()`).catch(()=>{});
  ws?.close();for(const p of pending.values())clearTimeout(p.timer);adb('forward','--remove',`tcp:${port}`);
- mkdirSync(outputDir,{recursive:true});writeFileSync(outputDir+'/alignment-replay.json',JSON.stringify({scope:'Real bundled detector in phone WebView; video canvas fed licensed still photos. Speech and haptics recorded, not physical field test.',results},null,2));
+ mkdirSync(outputDir,{recursive:true});writeFileSync(outputDir+'/alignment-replay.json',JSON.stringify({moving,scope:'Real bundled detector in phone WebView; video canvas fed licensed still photos. Speech and haptics recorded, not physical field test.',results},null,2));
 }
