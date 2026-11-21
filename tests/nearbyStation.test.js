@@ -36,3 +36,13 @@ test('GPS expires and only adjusts ranking of visually plausible routes', () => 
   assert.equal(ambiguous.reliable, false);
   assert.equal(selectNativeRoute([{ ...line('932'), confidence: .1 }], 1000, 1000, context).reliable, false);
 });
+
+test('browse groups routes at one boarding point and separates the opposite stop', async () => {
+  const { listNearbyStations } = await import('../src/services/nearbyStation.js');
+  const row = {Id:'1',nameZh:'大學門口',latitude:25,longitude:121,stopLocationId:'A',routeId:100,goBack:0};
+  const rows = [row,{...row,Id:'2',routeId:200},{...row,Id:'3',stopLocationId:'B',longitude:121.0002,goBack:1},
+    {...row,Id:'4',latitude:26}];
+  const result = listNearbyStations({latitude:25,longitude:121,accuracy:5},[{city:'taipei',rows}]);
+  assert.deepEqual(result.stations.map(s=>s.services.length),[2,1]);
+  assert.equal(result.stations[1].services[0].direction,'1');
+});

@@ -1,8 +1,8 @@
 import { Geolocation } from '@capacitor/geolocation';
 import { loadStationRecognitionContext, loadTransitFeed } from './transitApi.js';
-import { findNearbyStation } from './nearbyStation.js';
+import { findNearbyStation, listNearbyStations } from './nearbyStation.js';
 
-export async function locateNearbyStation() {
+async function locate() {
   let permission = await Geolocation.checkPermissions();
   if (permission.location !== 'granted') {
     permission = await Geolocation.requestPermissions({ permissions: ['location'] });
@@ -17,7 +17,18 @@ export async function locateNearbyStation() {
   const feeds = await Promise.all(cities.map(async city => ({
     city, rows: (await loadTransitFeed(city, 'stops')).rows,
   })));
-  const nearest = findNearbyStation(coords, feeds);
+  return {coords, feeds};
+}
+
+export async function locateNearbyStations() {
+  const location = await locate();
+  return location.kind ? location : listNearbyStations(location.coords, location.feeds);
+}
+
+export async function locateNearbyStation() {
+  const location = await locate();
+  if (location.kind) return location;
+  const nearest = findNearbyStation(location.coords, location.feeds);
   if (nearest.kind !== 'found') return nearest;
 
   const context = nearest.ambiguous

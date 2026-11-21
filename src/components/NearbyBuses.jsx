@@ -23,6 +23,7 @@ import {
 } from "../services/transitData.js";
 import { saveRecognitionContext, clearRecognitionContext } from "../services/recognitionContext.js";
 import { saveWaitingTarget } from "../services/waitingTarget.js";
+import { locateNearbyStations } from "../services/stationLocation.js";
 const cityNames = { taipei: "臺北市", newtaipei: "新北市" };
 const order = new Intl.Collator("zh-Hant", { numeric: true });
 export default function NearbyBuses({ onStartRecognition }) {
@@ -57,6 +58,23 @@ export default function NearbyBuses({ onStartRecognition }) {
     };
   }, []);
   useEffect(() => setLimit(60), [scope, query, city]);
+  const [stations,setStations] = useState([]);
+  const [notice,setNotice] = useState("");
+  const [busy,setBusy] = useState(false);
+  async function locate() {
+    if (busy) return;
+    setBusy(true);
+    setStations([]);
+    setNotice("正在定位並查詢附近站牌…");
+    try {
+      const result = await locateNearbyStations();
+      setStations(result.stations || []);
+      setNotice(result.kind === "found" ? `500 公尺內，列出最近 ${result.stations.length} 個站位` :
+        result.kind === "denied" ? "尚未取得定位權限，可到手機設定開啟。" :
+        result.kind === "inaccurate" ? "定位誤差較大，請到空曠處重新定位。" : "500 公尺內找不到雙北站牌。");
+    } catch { setNotice("無法取得位置或站牌資料，請確認定位與網路後重試。"); }
+    finally { setBusy(false); }
+  }
   if (selected)
     return (
       <RouteDetail
@@ -85,6 +103,21 @@ export default function NearbyBuses({ onStartRecognition }) {
         <h1>公車，隨時查。</h1>
         <p>雙北路線與即時到站資訊</p>
       </header>
+      <section className="nearby-stations" aria-labelledby="nearby-title">
+        <h2 id="nearby-title">附近站牌</h2>
+        <button className="bv-chip" onClick={locate} disabled={busy}>{busy ? "定位中…" : stations.length ? "更新我的位置" : "用目前位置查站牌"}</button>
+        <p role="status">{notice}</p>
+        {stations.map(({city,stop,distance,services}) => <details key={city+":"+stop.id}>
+          <summary>{stop.name} · 約 {distance} 公尺{stop.address && <small>{stop.address}</small>}</summary>
+          {services.map(service => {
+            const route = routes.find(r => r.city === service.city && r.id === service.id);
+            if (!route) return null;
+            const dir = service.direction === "1" ? "1" : "0";
+            return <button key={service.city+":"+service.id+":"+service.direction} className="use-stop" onClick={() => setSelected({...route,initialDirection:dir})}>
+              {route.name} · 往 {dir === "0" ? route.destination : route.departure}</button>;
+          })}
+        </details>)}
+      </section>
       <div className="scope-tabs" role="group" aria-label="查詢範圍">
         <button
           className={scope === "nearby" ? "selected" : ""}
@@ -180,7 +213,7 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
       if (mounted.current) setSelecting(null);
     }
   }
-  const [direction, setDirection] = useState("0"),
+  const [direction, setDirection] = useState(route.initialDirection || "0"),
     [stops, setStops] = useState([]),
     [feed, setFeed] = useState(null),
     [error, setError] = useState(""),

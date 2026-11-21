@@ -4,7 +4,7 @@ export const GPS_CONTEXT_TTL_MS = 3 * 60 * 1000;
 const MAX_DISTANCE_METERS = 120;
 const MAX_ACCURACY_METERS = 70;
 
-export function findNearbyStation(coords, feeds) {
+function nearbyRows(coords, feeds, radius) {
   const { latitude, longitude, accuracy } = coords;
   if (![latitude, longitude, accuracy].every(Number.isFinite) ||
       accuracy < 0 || accuracy > MAX_ACCURACY_METERS) return { kind: 'inaccurate' };
@@ -17,7 +17,7 @@ export function findNearbyStation(coords, feeds) {
       if (!row.nameZh?.trim() || !row.latitude || !row.longitude ||
           !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
       const distance = Math.hypot((lat - latitude) * 111320, (lon - longitude) * longitudeScale);
-      if (distance > MAX_DISTANCE_METERS) continue;
+      if (distance > radius) continue;
       nearby.push({
         city, row, distance,
         stop: { name: row.nameZh.trim(), id: String(row.Id), address: row.address || '',
@@ -26,6 +26,32 @@ export function findNearbyStation(coords, feeds) {
     }
   }
   nearby.sort((a, b) => a.distance - b.distance);
+  return {kind:'found', nearby};
+}
+
+export function listNearbyStations(coords, feeds) {
+  const result = nearbyRows(coords, feeds, 500);
+  if (!result.nearby) return result;
+  const stations = [];
+  for (const item of result.nearby) {
+    let station = stations.find(s => sameBoardingStop(item.row, s.stop, s.city === item.city));
+    if (!station) {
+      if (stations.length >= 12) continue;
+      station = {...item, distance: Math.round(item.distance), services: []};
+      stations.push(station);
+    }
+    const id = String(item.row.routeId), direction = String(item.row.goBack);
+    if (!station.services.some(s => s.city === item.city && s.id === id && s.direction === direction))
+      station.services.push({city:item.city, id, direction});
+  }
+  return {kind:stations.length ? 'found' : 'none', stations};
+}
+
+export function findNearbyStation(coords, feeds) {
+  const result = nearbyRows(coords, feeds, MAX_DISTANCE_METERS);
+  if (!result.nearby) return result;
+  const {nearby} = result;
+  const {accuracy} = coords;
   const closest = nearby[0];
   if (!closest) return { kind: 'none' };
 
