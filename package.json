@@ -12,7 +12,8 @@
     "ios:sync": "npm run build && cap sync ios",
     "ios:open": "cap open ios",
     "android:sync": "npm run build && cap sync android",
-    "test:android": "node scripts/test-android-device.mjs"
+    "test:android": "node scripts/test-android-device.mjs",
+    "test:platforms": "node scripts/test-platforms.mjs"
   },
   "dependencies": {
     "@capacitor-community/text-to-speech": "^8.0.2",
