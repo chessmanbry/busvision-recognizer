@@ -8,7 +8,7 @@ import { ScreenOrientation } from "@capacitor/screen-orientation";
 import { Capacitor } from "@capacitor/core";
 export default function App() {
   const [mode, setMode] = useState("recognize");
-  const autoStartOnEntry = Capacitor.getPlatform() === "android";
+  const autoStartOnEntry = Capacitor.isNativePlatform();
   useEffect(() => {
     ScreenOrientation.lock({ orientation: "portrait" }).catch(() => {});
   }, []);

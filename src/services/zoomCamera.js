@@ -3,12 +3,13 @@ const native = registerPlugin('BusVisionNative');
 
 // The detector and OCR both read the same stream as the preview.
 export async function openZoomCamera(current) {
-  const {max} = await native.startZoomCamera();
+  const session = crypto.randomUUID();
+  const {max} = await native.startZoomCamera({session});
   const canvas = document.createElement('canvas');
   let seq, stream, stopped=false, extension=1, timer, lens='';
   async function paint() {
-    const f=await native.zoomFrame({after:seq ?? -1});
-    if(!current() || stopped || !f.jpeg || f.seq===seq)return;
+    const f=await native.zoomFrame({session,after:seq ?? -1});
+    if(!current() || stopped || !f?.jpeg || f.seq===seq)return;
     const img=new Image(); img.src='data:image/jpeg;base64,'+f.jpeg;
     await img.decode();
     if(!current() || stopped)return;
@@ -24,14 +25,14 @@ export async function openZoomCamera(current) {
     try{await paint();}catch{/* A subsequent frame can recover. */}
     if(current() && !stopped)timer=setTimeout(loop,95);
   }
-  function close(){stopped=true;clearTimeout(timer);stream?.getTracks().forEach(t=>t.stop());void native.stopZoomCamera().catch(()=>{});}
+  function close(){stopped=true;clearTimeout(timer);stream?.getTracks().forEach(t=>t.stop());void native.stopZoomCamera({session}).catch(()=>{});}
   try{
     for(let i=0;i<80 && current() && seq==null;i++){await paint();if(seq==null)await new Promise(r=>setTimeout(r,50));}
     if(seq==null)throw Error('No native camera frames');
     stream=canvas.captureStream(15);void loop();
-    return {stream,max,close,layout:options=>native.layoutZoomPreview(options),get lens(){return lens;},async zoom(value){
+    return {stream,max,close,layout:options=>native.layoutZoomPreview({...options,session}),get lens(){return lens;},async zoom(value){
       const hw=Math.min(max,value);
-      await native.setCameraRatio({ratio:hw});extension=value/hw;
+      await native.setCameraRatio({session,ratio:hw});extension=value/hw;
     }};
   }catch(e){close();throw e;}
 }

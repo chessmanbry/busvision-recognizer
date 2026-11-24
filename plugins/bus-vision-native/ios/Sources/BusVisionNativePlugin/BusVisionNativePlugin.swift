@@ -12,9 +12,25 @@ public class BusVisionNativePlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "BusVisionNativePlugin"
     public let jsName = "BusVisionNative"
     public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "startZoomCamera", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setCameraRatio", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "layoutZoomPreview", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "zoomFrame", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopZoomCamera", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "echo", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "recognizeText", returnType: CAPPluginReturnPromise)
     ]
+    private let camera = BusCamera()
+    @objc func startZoomCamera(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { self.camera.start(call, webView: self.webView) }
+    }
+    @objc func layoutZoomPreview(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { self.camera.layout(call, webView: self.webView) }
+    }
+    @objc func setCameraRatio(_ call: CAPPluginCall) { camera.zoom(call) }
+    @objc func zoomFrame(_ call: CAPPluginCall) { camera.frame(call) }
+    @objc func stopZoomCamera(_ call: CAPPluginCall) { camera.stop(call) }
+
     private let implementation = BusVisionNative()
 
     private let ocrQueue = DispatchQueue(label: "busvision.ocr", qos: .userInitiated)

@@ -607,7 +607,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const [locationNotice, setLocationNotice] = useState('');
   const locationBusy = useRef(false);
   const resumeAfterLocation = useRef(false);
-  const gpsEnabled = Capacitor.getPlatform() === 'android';
+  const gpsEnabled = Capacitor.isNativePlatform();
   useEffect(() => {
     const timer = setInterval(() => {
       setStationDisplay(readRecognitionContext());
@@ -737,7 +737,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
     setStatus('正在啟用 App 內相機...');
     try {
       let cam;
-      if(Capacitor.getPlatform()==='android') {
+      if(Capacitor.isNativePlatform()) {
         try{cam=await openZoomCamera(()=>request===cameraRequestRef.current);}catch(e){debugLog('native-camera-fallback',{message:String(e)});}
       }
       if(request!==cameraRequestRef.current){cam?.close();return;}

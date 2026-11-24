@@ -26,8 +26,19 @@
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
-	<key>UIMainStoryboardFile</key>
-	<string>Main</string>
+	<key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key><false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array><dict>
+                <key>UISceneConfigurationName</key><string>BusVision</string>
+                <key>UISceneDelegateClassName</key><string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+                <key>UISceneStoryboardFile</key><string>Main</string>
+            </dict></array>
+        </dict>
+    </dict>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>armv7</string>
@@ -47,6 +58,10 @@
 		<string>zh-Hant</string>
 		<string>en</string>
 	</array>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>查詢附近公車站牌，協助判斷本站可能出現的路線。</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>使用附近站牌功能時，以目前位置查詢公車路線。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>拍攝公車車頭與預覽畫面，用來辨識路線號碼。</string>
 	<key>NSPhotoLibraryUsageDescription</key>

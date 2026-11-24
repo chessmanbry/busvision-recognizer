@@ -47,3 +47,56 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
 }
+
+final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
+        (UIApplication.shared.delegate as? AppDelegate)?.window = window
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--busvision-smoke") {
+            verifyRecognition()
+        }
+        #endif
+        self.scene(scene, openURLContexts: options.urlContexts)
+        for activity in options.userActivities { self.scene(scene, continue: activity) }
+    }
+
+    #if DEBUG
+    // Read only timing counters. Do not include camera images, OCR text or location.
+    private func verifyRecognition() {
+        let probe = """
+        (() => {
+            const video = document.querySelector('.bv-video');
+            const samples = JSON.parse(localStorage.getItem('busvision.recognition.timings.v1') || '[]')
+                .filter(s => s.source === 'auto-preview-ocr' && Date.parse(s.at) >= performance.timeOrigin);
+            return JSON.stringify({ready: document.readyState, visible: !document.hidden,
+                camera: !!document.querySelector('.native-live'), width: video?.videoWidth,
+                active: document.querySelector('.bv-auto-toggle')?.textContent || '',
+                completed: samples.length, outcome: samples.at(-1)?.outcome, elapsedMs: samples.at(-1)?.totalMs});
+        })()
+        """
+        for seconds in [3, 10, 20, 35] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
+                guard let root = self?.window?.rootViewController as? CAPBridgeViewController else { return }
+                root.webView?.evaluateJavaScript(probe) { value, error in
+                    let message = value as? String ?? error?.localizedDescription ?? "unavailable"
+                    FileHandle.standardError.write(Data("BV_SMOKE \(message)\n".utf8))
+                }
+            }
+        }
+    }
+    #endif
+
+    func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) {
+        for context in contexts {
+            var options: [UIApplication.OpenURLOptionsKey: Any] = [.openInPlace: context.options.openInPlace]
+            options[.sourceApplication] = context.options.sourceApplication
+            _ = ApplicationDelegateProxy.shared.application(.shared, open: context.url, options: options)
+        }
+    }
+
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        _ = ApplicationDelegateProxy.shared.application(.shared, continue: userActivity, restorationHandler: { _ in })
+    }
+}

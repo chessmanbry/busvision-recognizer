@@ -1,3 +1,11 @@
+# BusVision iPhone 測試版（2.0.0，build 40）
+
+此版在 iPhone 16e 上以 AVFoundation 提供直向預覽與相機變焦，以 Apple Vision 讀取文字。首頁與切回辨識分頁會自動開始辨識。附近站牌需要使用期間的定位權限。路線查詢、候車目標、震動、語音與辨識紀錄沿用跨平台介面。
+
+建置前執行 `npm ci` 和 `npm run ios:sync`，用 Xcode 開啟 `ios/App/App.xcodeproj`，選擇開發 Team 和實機。若要驗證自動辨識，在 Debug scheme 的啟動參數加上 `--busvision-smoke`。在 Xcode 主控台搜尋 `BV_SMOKE`，可看到啟動後第 3、10、20、35 秒的預覽尺寸、當次自動辨識次數和最近一輪結果。把手機保持解鎖並允許相機。測試紀錄僅輸出統計。
+
+以下為先前版本的開發紀錄。
+
 # iOS 測試版 2.0.0 rc 28
 
 本版沿用 rc26 的完整 iOS App 專案，新增雙北公車查詢及站點輔助辨識、共用介面與圖示更新，以及 OCR 尺寸及等待預算修正。這是供開發及實機驗證的版本，尚未發佈至 App Store 或 TestFlight。iOS 顯示版本為 `2.0.0`、build `28`；原始碼及診斷版本為 `2.0.0-rc.28`。
