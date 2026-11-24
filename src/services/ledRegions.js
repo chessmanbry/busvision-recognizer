@@ -1,10 +1,10 @@
 // Locate connected red/amber LED strokes; no route-specific templates or digit substitutions.
-export function findLedRegions(d, W, H) {
+export function findLedRegions(d, W, H, sideSign=false) {
   const mask = new Uint8Array(W * H),
     dil = new Uint8Array(W * H),
     seen = new Uint8Array(W * H),
     found = [];
-  for (let y = 1; y < H * 0.7; y++)
+  for (let y = 1; y < H * (sideSign ? 1 : 0.7); y++)
     for (let x = 1; x < W - 1; x++) {
       let i = (y * W + x) * 4;
       const r = d[i],

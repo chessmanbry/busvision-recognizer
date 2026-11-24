@@ -10,7 +10,8 @@ export function associate(previous, boxes, now) {
     const matches=fresh.filter(t=>overlap(t.box,box)>.4);
     const crowded=boxes.some((other,j)=>j!==i && overlap(other,box)>.12);
     const prior=matches.length===1 && boxes.filter(b=>overlap(b,matches[0].box)>.4).length===1 ? matches[0] : null;
-    return {box,at:now,crowded,history:!crowded && prior && !prior.crowded ? prior.history : []};
+    if(!crowded && prior && !prior.crowded) return Object.assign(prior,{box,at:now});
+    return {box,at:now,crowded,history:[]};
   });
 }
 export function observe(track, token, target, context, now, weak=false) {

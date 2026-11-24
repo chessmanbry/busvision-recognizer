@@ -212,8 +212,23 @@ try {
       check('候車資訊彈窗開啟',await waitFor("document.querySelector('.bv-info-dialog').open"));
       await evaluate("document.querySelector('.bv-info-dialog header button').click()");
       check('關閉資訊保留目標',await evaluate("!document.querySelector('.bv-info-dialog').open && !!localStorage.getItem('busvision.waitingTarget.v1')"));
-      await evaluate("document.querySelector('.bv-quick button').click()");
-      check('相機切換兩倍取景',await waitFor("document.querySelector('.bv-video').dataset.zoom==='2'"));
+      await waitFor("!!document.querySelector('.bv-zoom-slider input:not(:disabled)')");
+      const cameraFrame=()=>evaluate("(async()=>{const f=await Capacitor.nativePromise('BusVisionNative','zoomFrame',{});return {n:f.displayed,t:performance.now()};})()");
+      const first=await cameraFrame();await delay(4000);const last=await cameraFrame();
+      report.measurements.nativePreviewFps=Math.round((last.n-first.n)*1000/(last.t-first.t));
+      check('監測中原生預覽持續更新',report.measurements.nativePreviewFps>0,String(report.measurements.nativePreviewFps));
+      const point=await evaluate("(()=>{const r=document.querySelector('.bv-aim-guide').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()");
+      const fingers=d=>[-1,1].map((sign,i)=>({id:i+1,x:point.x+d*sign,y:point.y}));
+      await cdp('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:fingers(28)});
+      await cdp('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:fingers(56)});
+      await cdp('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      check('雙指放大可改變倍率',await waitFor("Number(document.querySelector('.bv-video').dataset.zoom)>1.5"));
+      for(const value of [1,3,10,15,1]){
+        await evaluate(`(()=>{const input=document.querySelector('.bv-zoom-slider input');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'${value}');input.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+        await delay(850);
+        const reading=await evaluate(`(async()=>{const f=await Capacitor.nativePromise('BusVisionNative','zoomFrame',{});return {label:document.querySelector('.bv-zoom-slider span').textContent, lens:f.lens, hasFrame:!!f.jpeg,zoom:document.querySelector('.bv-video').dataset.zoom};})()`);
+        check(`滑桿 ${value} 倍仍有原生影格`,reading.hasFrame && Number(reading.zoom)===value,JSON.stringify(reading));
+      }
       await clickText('候車與辨識資訊', '.bv-quick button');
       await clickText('取消候車目標', '.bv-wait-target button');
       check('可取消候車目標', await waitFor("!document.querySelector('.bv-wait-target') && !localStorage.getItem('busvision.waitingTarget.v1')"));

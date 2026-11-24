@@ -6,7 +6,7 @@ const adbPath = process.env.ADB || `${homedir()}/Library/Android/sdk/platform-to
 const serial = process.argv[2];
 const checkReader = process.argv.includes('--check-reader');
 const moving = process.argv.includes('--moving');
-const outputDir = moving ? 'test-results/iteration-rc37/moving' : 'test-results/iteration-rc37/still';
+const outputDir = moving ? 'test-results/iteration-rc39/moving' : 'test-results/iteration-rc39/still';
 if (!serial) throw new Error('Usage: node scripts/benchmark-public-buses.mjs SERIAL');
 const pkg = 'com.chessman.busvision2.recognizer';
 const adb = (...args) => execFileSync(adbPath, ['-s', serial, ...args], { timeout: 30000, maxBuffer: 12e6 });

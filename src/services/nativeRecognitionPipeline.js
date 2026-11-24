@@ -4,7 +4,7 @@ import { selectNativeRoute } from "./nativeRouteSelection.js";
 // All OCR boxes are returned in the original image coordinate system.
 export async function runNativePipeline(
   image,
-  { recognize, context, isCurrent, budgetMs = 12000 },
+  { recognize, context, isCurrent, budgetMs = 12000, sideSign = false },
 ) {
   const started = performance.now(),
     deadline = started + budgetMs;
@@ -48,7 +48,7 @@ export async function runNativePipeline(
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.drawImage(im, 0, 0, canvas.width, canvas.height);
   const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  const boxes = await locateLights(pixels, canvas.width, canvas.height);
+  const boxes = await locateLights(pixels, canvas.width, canvas.height, sideSign);
   const lines = [...result.lines];
   for (const box of boxes) {
     if (!isCurrent() || performance.now() > deadline - 200) break;
@@ -93,15 +93,15 @@ export async function runNativePipeline(
         source: "led-contrast",
       });
     }
-    selection = selectNativeRoute(lines, result.width, result.height, context);
+    selection = selectNativeRoute(lines, result.width, result.height, context, sideSign);
     // Inspect all shortlisted regions, so competing readable routes remain uncertain.
   }
   return { ...result, lines, selection, attempted };
 }
 
 // Keep bright, densely connected lamps from blocking controls or camera rendering.
-async function locateLights(pixels, width, height) {
-  if (typeof Worker === "undefined") return findLedRegions(pixels, width, height);
+async function locateLights(pixels, width, height, sideSign) {
+  if (typeof Worker === "undefined") return findLedRegions(pixels, width, height, sideSign);
   const worker = new Worker(new URL("./ledRegions.worker.js", import.meta.url), {type:"module"});
   try {
     return await new Promise(resolve => {
@@ -109,7 +109,7 @@ async function locateLights(pixels, width, height) {
       const finish = boxes => { clearTimeout(timer); resolve(boxes); };
       worker.onmessage = event => finish(event.data);
       worker.onerror = () => finish([]);
-      worker.postMessage({pixels,width,height}, [pixels.buffer]);
+      worker.postMessage({pixels,width,height,sideSign}, [pixels.buffer]);
     });
   } finally { worker.terminate(); }
 }

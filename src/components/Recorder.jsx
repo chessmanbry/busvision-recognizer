@@ -1,3 +1,4 @@
+import {openZoomCamera} from '../services/zoomCamera.js';
 import InfoPopup from './InfoPopup.jsx';
 import WaitingAssistant from './WaitingAssistant.jsx';
 import { ScanLine, Camera as CameraIcon, ImagePlus, Play, Pause, ChevronDown, LocateFixed } from 'lucide-react';
@@ -160,7 +161,7 @@ function getVisibleCoverSource(video) {
     sh = vw / boxRatio;
     sy = (vh - sh) / 2;
   }
-  const zoom = Number(video.dataset.zoom) || 1;
+  const zoom = Number(video.dataset.digitalZoom) || 1;
   return { sx: sx + sw*(1-1/zoom)/2, sy: sy + sh*(1-1/zoom)/2, sw: sw/zoom, sh: sh/zoom };
 }
 function centerSearchCrop(canvas) {
@@ -560,7 +561,15 @@ function findDemoPanels(canvas) {
 
 export default function Recorder({ autoStartOnEntry = false }) {
   const videoRef = useRef(null);
-  const [zoom, setZoom] = useState(1);
+  const [zoom,setZoom]=useState(1), [hwMax,setHwMax]=useState(0);
+  const nativeCamera=useRef(null);
+  useEffect(()=>{
+    const cam=nativeCamera.current;
+    if(!cam)return;
+    let valid=true;
+    cam.zoom(zoom).catch(()=>{if(valid){setStatus('無法調整倍率，請重新開啟相機');setZoom(1);}});
+    return ()=>{valid=false;};
+  },[zoom,hwMax]);
   const [notice, setNotice] = useState(null);
   const showNotice = React.useCallback(text => setNotice({text}), []);
   useEffect(() => {
@@ -611,6 +620,37 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const mutedRef = useRef(muted);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [mirrorMode, setMirrorMode] = useState(false);
+  useEffect(()=>{
+    const cam=nativeCamera.current, el=videoRef.current;
+    if(!cam || !el)return;
+    const sync=()=>{
+      const r=el.parentElement.getBoundingClientRect();
+      cam.layout({x:r.x,y:r.y,width:r.width,height:r.height,viewport:window.innerWidth,
+        extension:Math.max(1,zoom/hwMax),mirror:mirrorMode}).catch(()=>{});
+    };
+    sync();const observer=new ResizeObserver(sync);observer.observe(el.parentElement);
+    return ()=>observer.disconnect();
+  },[hwMax,zoom,mirrorMode]);
+  useEffect(()=>{
+    const el=videoRef.current?.parentElement;
+    if(!el)return;
+    let start=null;
+    const distance=t=>Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY);
+    const begin=e=>{
+      if(e.touches.length===2 && !e.target.closest('button,input,dialog,nav')){
+        start={distance:distance(e.touches),zoom:Number(videoRef.current.dataset.zoom)};
+        e.preventDefault();
+      }
+    };
+    const move=e=>{
+      if(!start || e.touches.length!==2)return;
+      e.preventDefault();setZoom(Math.max(1,Math.min(15,Math.round(start.zoom*distance(e.touches)/Math.max(1,start.distance)*10)/10)));
+    };
+    const end=()=>{start=null;};
+    el.addEventListener('touchstart',begin,{passive:false});el.addEventListener('touchmove',move,{passive:false});
+    el.addEventListener('touchend',end);el.addEventListener('touchcancel',end);
+    return ()=>{el.removeEventListener('touchstart',begin);el.removeEventListener('touchmove',move);el.removeEventListener('touchend',end);el.removeEventListener('touchcancel',end);};
+  },[]);
   const [lastRoute, setLastRoute] = useState('—');
   const [confidence, setConfidence] = useState(0);
   const [rawText, setRawText] = useState('');
@@ -620,6 +660,16 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const [busBox, setBusBox] = useState(null);
   const [debugLines, setDebugLines] = useState([]);
   const [debugOpen, setDebugOpen] = useState(false);
+
+  const reportTrackedRoute = React.useCallback(route=>{
+    const now=Date.now();
+    setLastRoute(route);setConfidence(.8);
+    if(lastSpokenRef.current.route===route && now-lastSpokenRef.current.at<30000)return;
+    lastSpokenRef.current={route,at:now};
+    const message=`辨識到 ${route}`;
+    showNotice(message);
+    if(mutedRef.current)setAnnouncement(message);else void speak(message,()=>activeRef.current && !mutedRef.current);
+  },[showNotice]);
 
   const reportStatus = (message, announce = true) => {
     setStatus(message);
@@ -672,6 +722,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
   };
 
   const stopCamera = () => {
+    nativeCamera.current?.close();nativeCamera.current=null;setHwMax(0);setZoom(1);
     setPreviewReady(false);
     cameraRequestRef.current += 1;
     if (streamRef.current) {
@@ -685,7 +736,13 @@ export default function Recorder({ autoStartOnEntry = false }) {
     const request = ++cameraRequestRef.current;
     setStatus('正在啟用 App 內相機...');
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      let cam;
+      if(Capacitor.getPlatform()==='android') {
+        try{cam=await openZoomCamera(()=>request===cameraRequestRef.current);}catch(e){debugLog('native-camera-fallback',{message:String(e)});}
+      }
+      if(request!==cameraRequestRef.current){cam?.close();return;}
+      nativeCamera.current=cam;setHwMax(cam?.max || 0);
+      const stream = cam?.stream || await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
@@ -1291,11 +1348,11 @@ export default function Recorder({ autoStartOnEntry = false }) {
   }, []);
 
   return (
-    <div className="bv-recognizer">
+    <div className={`bv-recognizer ${hwMax ? "native-live" : ""}`}>
       <video ref={videoRef} autoPlay playsInline muted aria-hidden="true" tabIndex={-1}
         onPlaying={() => setPreviewReady(true)}
         className={`bv-video ${previewReady ? 'ready' : ''}`}
-        data-zoom={zoom} style={{ transform: `scale(${mirrorMode ? -zoom : zoom}, ${zoom})` }} />
+        data-zoom={zoom} data-digital-zoom={hwMax ? 1 : zoom} style={{ transform: `scale(${(mirrorMode?-1:1)*(hwMax?1:zoom)}, ${hwMax?1:zoom})` }} />
       <div className={`bv-aim-guide bv-aim-${alignmentState}`} aria-hidden="true" />
       <div className="bv-sr-only" role="status" aria-atomic="true">{announcement}</div>
 
@@ -1331,8 +1388,10 @@ export default function Recorder({ autoStartOnEntry = false }) {
 
         <div className="bv-rec-dock">
           {notice && <aside className="bv-event"><span>{notice.text}</span><button aria-label="關閉這則提示" onClick={() => setNotice(null)}>×</button></aside>}
-          <div className="bv-quick"><button className="bv-chip" aria-label={`相機倍率 ${zoom} 倍，切換倍率`} onClick={() => setZoom(z => z === 3 ? 1 : z + 1)}>{zoom}× 變焦</button>
-          <InfoPopup><WaitingAssistant showNotice={showNotice} videoRef={videoRef} running={running && previewReady} mutedRef={mutedRef}
+          <div className="bv-quick"><label className="bv-zoom-slider"><span>{zoom}×</span>
+            <input type="range" min="1" max="15" step="0.1" value={zoom} disabled={!previewReady}
+              aria-label="相機變焦" aria-valuetext={`${zoom} 倍，${hwMax && zoom<=hwMax ? "相機變焦" : "數位放大"}`} onChange={e=>setZoom(Number(e.target.value))}/></label>
+          <InfoPopup><WaitingAssistant reportTrackedRoute={reportTrackedRoute} showNotice={showNotice} videoRef={videoRef} running={running && previewReady} mutedRef={mutedRef}
             announce={setAnnouncement} speak={speak} onAligned={setAlignmentState} onApproaching={setApproaching} resultHandlerRef={targetResultHandler} />
           {lastRoute !== '—' && confidence > 0 && (
             <div className={`bv-result-card ${confidence >= .72 ? 'high' : 'mid'}`}>

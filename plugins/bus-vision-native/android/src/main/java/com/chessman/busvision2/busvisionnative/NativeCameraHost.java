@@ -87,6 +87,8 @@ public class NativeCameraHost {
     sharedInstance = this;
   }
 
+  androidx.camera.view.PreviewView previewSurface(){return previewView;}
+
   public void setPreviewView(PreviewView pv) {
     this.previewView = pv;
   }

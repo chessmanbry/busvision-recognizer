@@ -24,6 +24,24 @@ import com.getcapacitor.annotation.PermissionCallback;
 )
 public class BusVisionNativePlugin extends Plugin {
 
+  private ZoomFrames frames;
+  @PluginMethod public void startZoomCamera(PluginCall call){
+    if(getPermissionState("camera")!=PermissionState.GRANTED){requestPermissionForAlias("camera",call,"zoomPermission");return;}
+    openZoom(call);
+  }
+  @PermissionCallback private void zoomPermission(PluginCall call){
+    if(getPermissionState("camera")==PermissionState.GRANTED)openZoom(call);else call.reject("camera permission denied");
+  }
+  private void openZoom(PluginCall call){getActivity().runOnUiThread(()->{
+    if(frames==null)frames=new ZoomFrames(getActivity());frames.start(call);
+  });}
+  @PluginMethod public void layoutZoomPreview(PluginCall call){getActivity().runOnUiThread(()->{if(frames!=null)frames.layout(call);else call.resolve();});}
+  @PluginMethod public void zoomFrame(PluginCall call){if(frames==null)call.resolve(new JSObject());else frames.frame(call);}
+  @PluginMethod public void setCameraRatio(PluginCall call){getActivity().runOnUiThread(()->{
+    if(frames==null)call.reject("camera closed");else frames.zoom(call.getFloat("ratio",1f),call);
+  });}
+  @PluginMethod public void stopZoomCamera(PluginCall call){getActivity().runOnUiThread(()->{if(frames!=null)frames.stop();call.resolve();});}
+  @Override protected void handleOnPause(){super.handleOnPause();getActivity().runOnUiThread(()->{if(frames!=null)frames.stop();});}
   private NativeCameraHost host;
   private final java.util.concurrent.atomic.AtomicBoolean ocrBusy = new java.util.concurrent.atomic.AtomicBoolean(false);
   private com.google.mlkit.vision.text.TextRecognizer textRecognizer;
@@ -70,6 +88,7 @@ public class BusVisionNativePlugin extends Plugin {
   @Override
   protected void handleOnDestroy() {
     if (textRecognizer != null) { textRecognizer.close(); textRecognizer = null; }
+    getActivity().runOnUiThread(()->{if(frames!=null)frames.destroy();});
     super.handleOnDestroy();
   }
 

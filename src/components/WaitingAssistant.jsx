@@ -1,6 +1,6 @@
+import {runNativePipeline} from '../services/nativeRecognitionPipeline.js';
 import {associate, observe} from '../services/busEvidence.js';
 import {canUseNativeOcr, recognizeNativeText} from '../services/nativeOcr.js';
-import {selectNativeRoute} from '../services/nativeRouteSelection.js';
 import {recordRecognitionTelemetry} from '../services/recognitionTelemetry.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Haptics, ImpactStyle } from '@capacitor/haptics';
@@ -9,7 +9,7 @@ import { loadArrivals, loadBoardingCandidates } from '../services/transitApi.js'
 import { selectArrival, isFeedFresh, etaLabel } from '../services/transitData.js';
 import { createVehicleDetector } from './vehicleDetector.js';
 
-export default function WaitingAssistant({ showNotice, videoRef, running, mutedRef, announce, speak, onAligned, onApproaching, resultHandlerRef }) {
+export default function WaitingAssistant({ reportTrackedRoute, showNotice, videoRef, running, mutedRef, announce, speak, onAligned, onApproaching, resultHandlerRef }) {
   const [target, setTarget] = useState(readWaitingTarget);
   const [eta, setEta] = useState('更新中');
   const [alignment, setAlignment] = useState('準備車體偵測');
@@ -71,7 +71,8 @@ export default function WaitingAssistant({ showNotice, videoRef, running, mutedR
     return () => { active = false; clearInterval(timer); candidates.current=null; onApproaching(false); };
   }, [target, onApproaching, feedback]);
   useEffect(() => {
-    let tracks = [], turn = 0;
+    let tracks = [], turn = 0, reading = false;
+    const spoken = new Map();
     if (!running) { const paused = setTimeout(() => {setAlignment('車體偵測已暫停'); onAligned('idle');}, 0); return () => clearTimeout(paused); }
     let active = true, timer;
     const current = () => active && !document.hidden;
@@ -98,7 +99,7 @@ export default function WaitingAssistant({ showNotice, videoRef, running, mutedR
           canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);
           const t=readWaitingTarget();
           let image=video;
-          if(t && canUseNativeOcr()){
+          if(canUseNativeOcr() && !reading){
             if(snapshot.width!==video.videoWidth || snapshot.height!==video.videoHeight){
               snapshot.width=video.videoWidth; snapshot.height=video.videoHeight;
             }
@@ -118,17 +119,33 @@ export default function WaitingAssistant({ showNotice, videoRef, running, mutedR
           }
           tracks=associate(tracks,(predictions || []).filter(p=>p.class==='bus' && p.score>=.55).map(p=>p.bbox),Date.now());
           const separate=tracks.filter(b=>!b.crowded);
-          if (image===snapshot && separate.length && Date.now()-lastTarget.current>=30000){
+          if (image===snapshot && separate.length && (!t || Date.now()-lastTarget.current>=30000)){
+            reading=true;
+            void (async()=>{
             const bus=separate[turn++ % separate.length];
             const [x,y,w,h]=bus.box.map(n=>n/scale);
+            // Wide silhouettes may carry a side destination display anywhere along the windows.
+            const band=w/h>1.45 ? .91 : .72;
             crop.width=Math.max(1,Math.min(1200,Math.round(w)));
-            crop.height=Math.max(1,Math.round(crop.width*h*.72/w));
-            crop.getContext('2d').drawImage(snapshot,x,y,w,h*.72,0,0,crop.width,crop.height);
+            crop.height=Math.max(1,Math.round(crop.width*h*band/w));
+            crop.getContext('2d').drawImage(snapshot,x,y,w,h*band,0,0,crop.width,crop.height);
             const started=performance.now();
-            const r=await recognizeNativeText(crop.toDataURL('image/jpeg',.94));
-            if(!current() || readWaitingTarget()?.createdAt!==t.createdAt) return;
-            const pick=selectNativeRoute(r.lines,r.width,r.height,null);
+            const data=crop.toDataURL('image/jpeg',.94);
+            const valid=()=>current() && tracks.includes(bus) && readWaitingTarget()?.createdAt===t?.createdAt;
+            const result=await runNativePipeline(data,{recognize:recognizeNativeText,context:null,isCurrent:valid,budgetMs:2600,sideSign:band>.8});
+            const r=result;
+            if(!valid())return;
+            const pick=result.selection;
             const best=pick.best;
+            if(!t){
+              if(pick.reliable && best && best.route.length>=2){
+                if(bus.lastRoute===best.route && Date.now()-bus.lastRead<3500 && Date.now()-(spoken.get(best.route)||0)>30000){
+                  spoken.set(best.route,Date.now());reportTrackedRoute(best.route);
+                }
+                bus.lastRoute=best.route;bus.lastRead=Date.now();
+              }else bus.lastRoute=null;
+              return;
+            }
             const weak=!pick.reliable && best?.route===t.routeName && /^\d{3,4}$/.test(best.route) &&
               best.ocrConfidence>=.27 && best.line.y/r.height<.3 &&
               pick.candidates.every(c=>c.route===best.route);
@@ -139,6 +156,7 @@ export default function WaitingAssistant({ showNotice, videoRef, running, mutedR
               lastTarget.current=Date.now();
               void feedback(`你要的 ${t.routeName} 公車出現在畫面中了，請再確認往 ${t.destination || '所選方向'}。`,2,current);
             }
+            })().catch(()=>{}).finally(()=>{reading=false;});
           }
         }
       } catch {
@@ -149,7 +167,7 @@ export default function WaitingAssistant({ showNotice, videoRef, running, mutedR
       if (current()) { onAligned('idle'); setAlignment('車體偵測暫不可用，號碼辨識仍可使用'); }
     });
     return () => { active = false; clearTimeout(timer); clearTimeout(preparing); detector.dispose(); };
-  }, [running, videoRef, onAligned, feedback]);
+  }, [running, videoRef, onAligned, feedback, reportTrackedRoute]);
   return <section className="bv-waiting" aria-label="候車與對準提示">
     {target && <div className="bv-wait-target"><strong>等 {target.routeName} · 往 {target.destination || '所選方向'}</strong>
       <span>{target.stop.name} · {eta}</span>

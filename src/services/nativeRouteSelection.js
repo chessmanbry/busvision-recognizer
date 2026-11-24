@@ -34,14 +34,14 @@ export function literalRouteCandidates(text) {
   }
   return [...new Set(found)];
 }
-export function selectNativeRoute(lines, width, height, context) {
+export function selectNativeRoute(lines, width, height, context, sideSign=false) {
   const candidates = [];
   const gps = context?.source === "gps";
   for (const line of lines || []) {
     if (
       !Number.isFinite(line.h) ||
       line.h < height * 0.012 ||
-      line.y > height * 0.7
+      line.y > height * (sideSign && line.source==="led-contrast" ? 1 : 0.7)
     )
       continue;
     for (const route of literalRouteCandidates(line.text)) {
