@@ -1,3 +1,4 @@
+import {selectNativeRoute} from '../services/nativeRouteSelection.js';
 import {runNativePipeline} from '../services/nativeRecognitionPipeline.js';
 import {associate, observe} from '../services/busEvidence.js';
 import {canUseNativeOcr, recognizeNativeText} from '../services/nativeOcr.js';
@@ -117,8 +118,10 @@ export default function WaitingAssistant({ reportTrackedRoute, showNotice, video
           if (result.cue && Date.now() - lastFeedback.current > 7000) {
             void feedback(result.cue === 'acquired' ? '畫面中有公車，請保持手機方向。' : '公車離開畫面，請重新對準。', result.cue === 'acquired' ? 1 : 0, current);
           }
-          tracks=associate(tracks,(predictions || []).filter(p=>p.class==='bus' && p.score>=.55).map(p=>p.bbox),Date.now());
-          const separate=tracks.filter(b=>!b.crowded);
+          const boxes=(predictions || []).filter(p=>p.class==='bus' && p.score>=.55).map(p=>p.bbox);
+          const now=Date.now();
+          tracks=boxes.length ? associate(tracks,boxes,now) : tracks.filter(b=>now-b.at<750);
+          const separate=boxes.length ? tracks.filter(b=>!b.crowded) : [];
           if (image===snapshot && separate.length && (!t || Date.now()-lastTarget.current>=30000)){
             reading=true;
             void (async()=>{
@@ -132,10 +135,18 @@ export default function WaitingAssistant({ reportTrackedRoute, showNotice, video
             const started=performance.now();
             const data=crop.toDataURL('image/jpeg',.94);
             const valid=()=>current() && tracks.includes(bus) && readWaitingTarget()?.createdAt===t?.createdAt;
-            const result=await runNativePipeline(data,{recognize:recognizeNativeText,context:null,isCurrent:valid,budgetMs:2600,sideSign:band>.8});
-            const r=result;
+            let r=await recognizeNativeText(data);
+            let pick=selectNativeRoute(r.lines,r.width,r.height,null);
+            if(!pick.reliable && band>.8 && (!t || pick.best?.route!==t.routeName) && valid()){
+              // Reuse the first OCR result. Only invoke LED enhancement on an unreadable side panel.
+              let first=r;
+              r=await runNativePipeline(data,{recognize:async image=>{
+                if(first){const saved=first;first=null;return saved;}
+                return recognizeNativeText(image);
+              },context:null,isCurrent:valid,budgetMs:1800,sideSign:true});
+              pick=r.selection;
+            }
             if(!valid())return;
-            const pick=result.selection;
             const best=pick.best;
             if(!t){
               if(pick.reliable && best && best.route.length>=2){

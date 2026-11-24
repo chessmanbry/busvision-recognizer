@@ -48,7 +48,16 @@ final class ZoomFrames {
             if(request!=generation){call.reject("camera cancelled");return;}
             try {
                 provider=future.get();
-                var builder=new ImageAnalysis.Builder().setTargetResolution(new Size(1920,1080))
+                // Some devices negotiated a 2736-square analysis buffer alongside Preview.
+                // Bound JPEG processing while leaving the native Preview surface unconstrained.
+                var selector=new androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                    .setResolutionFilter((sizes,rotation)->{
+                        var limited=new java.util.ArrayList<Size>();
+                        for(Size size:sizes) if(size.getWidth()*size.getHeight()<=1920*1080)limited.add(size);
+                        limited.sort((a,b)->Integer.compare(b.getWidth()*b.getHeight(),a.getWidth()*a.getHeight()));
+                        return limited.isEmpty()?sizes:limited;
+                    }).build();
+                var builder=new ImageAnalysis.Builder().setResolutionSelector(selector)
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST);
                 new Camera2Interop.Extender<>(builder).setSessionCaptureCallback(new CameraCaptureSession.CaptureCallback(){
                     @Override public void onCaptureCompleted(CameraCaptureSession session,CaptureRequest req,TotalCaptureResult result){
