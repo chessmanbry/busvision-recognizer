@@ -11,28 +11,40 @@ from pathlib import Path
 from report import parse_console, write_report
 
 HERE = Path(__file__).resolve().parent
-FAKE = '''#!/usr/bin/env python3
+FAKE = r'''#!/usr/bin/env python3
 import json, os, sys, time
+from datetime import datetime,timezone
 from pathlib import Path
-args = sys.argv[1:]
-if "list" in args and "devices" in args:
-    print(json.dumps({"result":{"devices":[{"identifier":"phone","hardwareProperties":{"udid":"phone","marketingName":"iPhone 16e"}}]}}))
-elif "devices" in args:
-    print("List of devices attached\\nsample device model:S22")
-elif "packages" in args:
-    print("package:com.chessman.busvision2.recognizer uid:10123")
-elif "shell" in args:
-    print("ok")
+args=sys.argv[1:]
+trigger=Path(os.environ['TRIGGER'])
+def emit_result(obj):print(json.dumps({'result':obj}))
+def event(kind,**kw):
+    return dict(kind=kind,at=datetime.now(timezone.utc).isoformat(),**kw)
+if 'launch' in args or '--console' in args or '--terminate-existing' in args:
+    sys.exit(90)
+if 'devices' in args and 'list' in args:
+    emit_result({'devices':[{'identifier':'phone','hardwareProperties':{'udid':'phone','marketingName':'iPhone 16e'}}]})
+elif 'devices' in args: print('List of devices attached\nsample device model:S22')
+elif 'apps' in args: emit_result({'apps':[{'url':'file:///Test.app'}]})
+elif 'processes' in args: emit_result({'runningProcesses':[{'executable':'file:///Test.app/App','processIdentifier':12}]})
+elif 'files' in args: emit_result({'files':[]})
+elif 'copy' in args:
+    dest=Path(args[args.index('--destination')+1])
+    if 'current.json' in args[args.index('--source')+1]: dest.write_text(json.dumps({'id':'2026-11-25T12-00-00-000Z','part':0}))
+    else:
+        rows=[event('camera',seq=0)]
+        if trigger.exists(): rows += [event('ocr',seq=1,route='941',ms=123),event('confirmed',seq=2,route='941',source='bus-crop'),event('request',seq=3,action='haptic')]
+        dest.write_text(''.join(json.dumps(r)+'\n' for r in rows))
+elif 'get-current-user' in args:print('0')
+elif 'packages' in args:print('package:com.chessman.busvision2.recognizer')
+elif 'shell' in args:print('06-01 12:00:00.000')
 else:
-    ios = "--console" in args
-    prefix = "⚡️  [log] - " if ios else "File: https://localhost - Line 1 - Msg: "
-    print(prefix + '[BusVisionRecognizer] camera-started {"videoWidth":1080,"videoHeight":1920}', flush=True)
-    trigger = Path(os.environ["TRIGGER"])
-    while not trigger.exists(): time.sleep(.02)
-    print(prefix + '[BusVisionRecognizer] native-ocr-result {"engine":"apple-vision","elapsedMs":123,"lines":[{"text":"PRIVATE-CONTENT"}],"selected":"941","reliable":true}', flush=True)
-    route = "941" if ios else "932"
-    print(prefix + '[BusVisionRecognizer] recognize-result ' + json.dumps({"route":route,"source":"auto-preview-ocr"}), flush=True)
-    print("⚡️  To Native ->  Haptics impact 123" if ios else "To native (Capacitor plugin): callbackId: 12, pluginId: Haptics, methodName: impact", flush=True)
+    def log(e):print('[BusVisionField] '+json.dumps(e),flush=True)
+    log(event('camera'))
+    while not trigger.exists():time.sleep(.02)
+    log(event('ocr',route='941',ms=123,raw='PRIVATE-CONTENT'))
+    log(event('confirmed',route='932',source='auto-preview-ocr'))
+    log(event('request',action='haptic'))
     time.sleep(12)
 '''
 

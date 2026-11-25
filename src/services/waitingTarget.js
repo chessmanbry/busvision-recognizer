@@ -2,11 +2,11 @@ const KEY = 'busvision.waitingTarget.v1';
 export function readWaitingTarget(now = Date.now()) {
   try {
     const t = JSON.parse(localStorage.getItem(KEY));
-    return t && ['taipei', 'newtaipei'].includes(t.city) && t.routeId && t.routeName && t.stop?.id && ['0','1'].includes(t.stop.direction) && now >= t.createdAt && now - t.createdAt < 2 * 60 * 60 * 1000 ? t : null;
+    return t && ['taipei', 'newtaipei'].includes(t.city) && t.routeId && t.routeName && t.stop?.id && ['0','1'].includes(t.stop.direction) && now >= t.createdAt && now - t.createdAt < 2 * 60 * 60 * 1000 ? {...t, destination:t.stop.destination || ''} : null;
   } catch { return null; }
 }
 export function saveWaitingTarget(route, stop) {
-  const target = { city: route.city, routeId: route.id, routeName: route.name, destination: stop.direction === '0' ? route.destination : route.departure, stop: {id: stop.id, name: stop.name, direction: stop.direction}, createdAt: Date.now() };
+  const target = { city: route.city, routeId: route.id, routeName: route.name, pathId: route.pathId, destination: stop.destination || '', next:stop.next || '', stop: {...stop}, createdAt: Date.now() };
   localStorage.setItem(KEY, JSON.stringify(target));
   return target;
 }

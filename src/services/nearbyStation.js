@@ -21,7 +21,7 @@ function nearbyRows(coords, feeds, radius) {
       nearby.push({
         city, row, distance,
         stop: { name: row.nameZh.trim(), id: String(row.Id), address: row.address || '',
-          locationId: String(row.stopLocationId || ''), lat, lon },
+          routeId: String(row.routeId), direction:String(row.goBack), locationId: String(row.stopLocationId || ''), lat, lon },
       });
     }
   }
@@ -41,8 +41,8 @@ export function listNearbyStations(coords, feeds) {
       stations.push(station);
     }
     const id = String(item.row.routeId), direction = String(item.row.goBack);
-    if (!station.services.some(s => s.city === item.city && s.id === id && s.direction === direction))
-      station.services.push({city:item.city, id, direction});
+    if (!station.services.some(s => s.city === item.city && s.id === id && s.direction === direction && s.stopId === item.stop.id))
+      station.services.push({city:item.city, id, direction,stopId:item.stop.id});
   }
   return {kind:stations.length ? 'found' : 'none', stations};
 }

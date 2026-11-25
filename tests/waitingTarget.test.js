@@ -22,7 +22,7 @@ test('target exact route, no substring or colored-route confusion',()=>{
 });
 test('target stores city, direction and stop, expires after two hours and can cancel',()=>{
  const data=new Map(); globalThis.localStorage={getItem:k=>data.get(k),setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};
- const t=saveWaitingTarget({city:'newtaipei',id:'1',name:'932',departure:'A',destination:'B'},{id:'2',name:'C',direction:'1'});
+ const t=saveWaitingTarget({city:'newtaipei',id:'1',name:'932',departure:'A',destination:'B'},{id:'2',name:'C',direction:'1',destination:'A'});
  assert.equal(readWaitingTarget().destination,'A'); assert.equal(readWaitingTarget().stop.direction,'1');
  assert.equal(readWaitingTarget(t.createdAt+7200000),null);
  clearWaitingTarget(); assert.equal(readWaitingTarget(),null);

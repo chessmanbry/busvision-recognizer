@@ -336,3 +336,5 @@ button.danger { background:rgba(255,90,102,0.18); color:#ffb7bd; }
 .bv-zoom-slider input{width:100%;min-height:44px;accent-color:#73e3ec;margin:0}
 html:has(.native-live),body:has(.native-live),#root:has(.native-live),.bv-shell:has(.native-live),.bv-recognizer.native-live{background:transparent}
 .bv-recognizer.native-live .bv-video.ready{opacity:0}
+.bv-station-choices {max-height:36vh;overflow:auto;background:#102636;color:#fff;padding:12px;border-radius:12px;pointer-events:auto}
+.bv-station-choices button {display:block;min-height:44px;margin:4px 0}

@@ -38,3 +38,20 @@ export function observe(track, token, target, context, now, weak=false) {
     return 'corroborated';
   return 'candidate';
 }
+
+export function corroborateFragments(track, token, inventory, capturedAt, now) {
+  if (!inventory || now >= inventory.expires || track.crowded || !/^\d{2,4}$/.test(token)) {
+    track.fragments = [];
+    return null;
+  }
+  const prior = (track.fragments || []).filter(f => capturedAt-f.at < 3500 && capturedAt > f.at);
+  track.fragments = [...prior, {token, at:capturedAt}].slice(-6);
+  const parts = [...new Set(track.fragments.map(f => f.token))];
+  const possible = inventory.routes.filter(name => parts.every(p => name.includes(p)));
+  if (!possible.length) track.fragments = [{token,at:capturedAt}];
+  const [route] = possible;
+  if (possible.length !== 1 || !/^\d{3,4}$/.test(route) ||
+      !inventory.entering.some(e => e.name === route && now < e.until)) return null;
+  return parts.some(a => parts.some(b => a !== b && route.startsWith(a) && route.endsWith(b) &&
+    a.length+b.length >= route.length)) ? route : null;
+}

@@ -19,10 +19,10 @@ import {
 import {
   etaLabel,
   isFeedFresh,
-  selectArrival,
+  selectArrival, stopDirection,
 } from "../services/transitData.js";
-import { saveRecognitionContext, clearRecognitionContext } from "../services/recognitionContext.js";
-import { saveWaitingTarget } from "../services/waitingTarget.js";
+import { saveRecognitionContext } from "../services/recognitionContext.js";
+import { saveWaitingTarget, clearWaitingTarget } from "../services/waitingTarget.js";
 import { locateNearbyStations } from "../services/stationLocation.js";
 const cityNames = { taipei: "臺北市", newtaipei: "新北市" };
 const order = new Intl.Collator("zh-Hant", { numeric: true });
@@ -78,7 +78,7 @@ export default function NearbyBuses({ onStartRecognition }) {
   if (selected)
     return (
       <RouteDetail
-        key={`${selected.city}:${selected.id}`}
+        key={`${selected.city}:${selected.id}:${selected.pathId}`}
         route={selected}
         onBack={() => setSelected(null)}
         onStartRecognition={onStartRecognition}
@@ -109,13 +109,10 @@ export default function NearbyBuses({ onStartRecognition }) {
         <p role="status">{notice}</p>
         {stations.map(({city,stop,distance,services}) => <details key={city+":"+stop.id}>
           <summary>{stop.name} · 約 {distance} 公尺{stop.address && <small>{stop.address}</small>}</summary>
-          {services.map(service => {
-            const route = routes.find(r => r.city === service.city && r.id === service.id);
-            if (!route) return null;
-            const dir = service.direction === "1" ? "1" : "0";
-            return <button key={service.city+":"+service.id+":"+service.direction} className="use-stop" onClick={() => setSelected({...route,initialDirection:dir})}>
-              {route.name} · 往 {dir === "0" ? route.destination : route.departure}</button>;
-          })}
+          {services.map(({route,stop,destination,next}) =>
+            <button key={[route.city,route.id,route.pathId,stop.id,stop.order].join('/')} className="use-stop"
+              onClick={() => setSelected({...route, initialDirection:stop.direction, initialStop:stop})}>
+              {route.name} · 往 {destination || '方向待確認'}{next && `，下一站 ${next}`}</button>)}
         </details>)}
       </section>
       <div className="scope-tabs" role="group" aria-label="查詢範圍">
@@ -164,7 +161,7 @@ export default function NearbyBuses({ onStartRecognition }) {
         {list.slice(0, limit).map((r) => (
           <button
             className="route-picker"
-            key={`${r.city}:${r.id}`}
+            key={`${r.city}:${r.id}:${r.pathId}`}
             onClick={() => setSelected(r)}
           >
             <div>
@@ -197,7 +194,7 @@ export default function NearbyBuses({ onStartRecognition }) {
 function RouteDetail({ route, onBack, onStartRecognition }) {
   const [selecting, setSelecting] = useState(null),
     [contextError, setContextError] = useState("");
-  async function useStop(stop) {
+  async function useStop(stop, waiting = false) {
     if (selecting) return;
     setSelecting(stop.id);
     setContextError("");
@@ -205,6 +202,8 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
       const context = await loadStationRecognitionContext(route.city, stop);
       if (mounted.current) {
         saveRecognitionContext(context);
+        if (waiting) saveWaitingTarget(route, {...stop, ...stopDirection(stops,stop)});
+        else clearWaitingTarget();
         onStartRecognition();
       }
     } catch {
@@ -244,7 +243,7 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
   async function refreshStops() {
     setStopsLoading(true);
     try {
-      const value = await loadRouteStops(route.city, route.id);
+      const value = await loadRouteStops(route.city, route.id, route.pathId);
       if (mounted.current) {
         setStops(value);
         setStopError("");
@@ -303,11 +302,13 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
           >
             <small>{d === "0" ? "去程" : "返程"}</small>
             <strong>
-              往 {d === "0" ? route.destination : route.departure}
+              往 {stops.filter(s=>s.direction===d).at(-1)?.destination || '方向待確認'}
             </strong>
           </button>
         ))}
       </div>
+      {route.initialStop && route.initialStop.direction === direction && <button className="use-stop" disabled={!!selecting}
+        onClick={()=>useStop(route.initialStop)}>確認在{route.initialStop.name}候車，開始辨識</button>}
       <div className="feed-status">
         <span className={fresh ? "live-dot" : "idle-dot"} />
         <span>
@@ -363,7 +364,7 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
                 ? etaLabel(arrival?.EstimateTime)
                 : { text: loading ? "更新中" : "暫無預估", kind: "unknown" };
             return (
-              <li key={stop.id} className={stop.nearby ? "campus-stop" : ""}>
+              <li key={stop.id+":"+stop.order} className={stop.nearby ? "campus-stop" : ""}>
                 <div className={`stop-eta ${eta.kind}`}>
                   {eta.text}
                   {eta.unit && ` ${eta.unit}`}
@@ -380,14 +381,14 @@ function RouteDetail({ route, onBack, onStartRecognition }) {
                   <span>
                     {i + 1} 站{stop.address ? ` · ${stop.address}` : ""}
                   </span>
-                  <button className="use-stop wait-target-button" onClick={() => { clearRecognitionContext(); saveWaitingTarget(route, stop); onStartRecognition(); }}
-                    aria-label={`等 ${route.name}，往 ${direction === '0' ? route.destination : route.departure}，在 ${stop.name} 上車`}>
+                  <button className="use-stop wait-target-button" disabled={!!selecting} onClick={() => useStop(stop,true)}
+                    aria-label={`等 ${route.name}，往 ${visibleStops.at(-1)?.destination || '方向待確認'}，在 ${stop.name} 上車`}>
                     我要搭這班
                   </button>
                   <button
                     className="use-stop"
                     disabled={!!selecting}
-                    onClick={() => useStop(stop)}
+                    aria-label={`確認在${stop.name}候車，往${visibleStops.at(-1)?.destination}，下一站${visibleStops[i+1]?.name || "終點"}`} onClick={() => useStop(stop)}
                   >
                     {selecting === stop.id ? "正在準備…" : "設為辨識站點"}
                   </button>

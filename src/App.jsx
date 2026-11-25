@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { ScanLine, BusFront, History } from "lucide-react";
+import { ScanLine, BusFront, History, ClipboardList } from "lucide-react";
+import FieldTools from "./components/FieldTools";
 import Recorder from "./components/Recorder";
 import RecognitionLogs from "./components/RecognitionLogs";
 import NearbyBuses from "./components/NearbyBuses";
@@ -15,6 +16,7 @@ export default function App() {
   const items = [
     { id: "recognize", icon: ScanLine, label: "辨識" },
     { id: "nearby", icon: BusFront, label: "公車查詢" },
+    { id: "field", icon: ClipboardList, label: "外測工具" },
     { id: "logs", icon: History, label: "辨識紀錄" },
   ];
   return (
@@ -31,6 +33,7 @@ export default function App() {
         {mode === "nearby" && (
           <NearbyBuses onStartRecognition={() => setMode("recognize")} />
         )}
+        {mode === "field" && <FieldTools onScan={()=>setMode("recognize")} />}
         {mode === "logs" && <RecognitionLogs />}
       </main>
       <nav className="bv-nav" aria-label="主要功能">

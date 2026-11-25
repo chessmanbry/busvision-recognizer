@@ -43,6 +43,9 @@ export function routeMatchesContext(route, context) {
   );
 }
 export function sameBoardingStop(raw, selected, sameCity) {
+  if (sameCity && selected.routeId && String(raw.routeId) === selected.routeId &&
+      selected.direction != null && String(raw.goBack) !== selected.direction) return false;
+  if (sameCity && selected.id && String(raw.Id) === selected.id) return true;
   const locationId = String(raw.stopLocationId || "");
   if (sameCity && selected.locationId && selected.locationId !== "0" &&
       locationId && locationId !== "0") {
@@ -53,6 +56,6 @@ export function sameBoardingStop(raw, selected, sameCity) {
   return (
     raw.nameZh === selected.name &&
     Math.hypot((lat - selected.lat) * 111000, (lon - selected.lon) * 101000) <=
-      25
+      3
   );
 }

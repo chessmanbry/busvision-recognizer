@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from devices import DeviceError, discover, monitor
+from devices import DeviceError, discover, monitor, prepare, ios_pid, run, APP
 from report import LABEL, PLATFORMS, write_report
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +30,9 @@ class Session:
         self.children = set()
         self.bus = None
         self.last = {}
+        self.wall_start = time.time()
+        self.links = {}
+        self.scans = {}
         self.add("session", platforms=platforms, formatVersion=1)
 
     def add(self, kind, **data):
@@ -41,10 +44,13 @@ class Session:
                 self.stream.flush()
                 os.fsync(self.stream.fileno())
             device = data.get("device")
-            if kind in ("capture", "ocr", "confirmed"):
-                self.last[device] = row["t"]
+            if device and kind not in ("link","process","system_report","diagnostic"):
+                self.scans[device] = {"confirmed":"確認 "+str(data.get("route","")), "no_result":"本輪沒有確認車號",
+                                      "camera":"相機掃描中", "capture":"相機掃描中", "session_stop":"手機場次已結束"}.get(kind,self.scans.get(device,"已收到事件"))
+
+                self.last[device] = (row["t"],row["at"])
             if kind == "link":
-                self.last.pop(device, None)
+                self.links[device] = data["message"]
                 print(f"[{PLATFORMS[device]}] {data['message']}", flush=True)
             if kind == "confirmed":
                 print(f"[{PLATFORMS[device]}] 確認 {data.get('route','？')}", flush=True)
@@ -71,14 +77,14 @@ class Session:
         with self.lock:
             now = time.monotonic() - self.start
             for p in platforms:
-                age = now - self.last[p] if p in self.last else None
-                text = "尚無取像或 OCR 資料" if age is None else f"最近事件 {age:.0f} 秒前"
+                age = now - self.last[p][0] if p in self.last else None
+                text = "尚無取像或 OCR 資料" if age is None else f"最後收到 {self.last[p][1]}（{age:.0f} 秒前），{self.scans[p]}"
                 if age is not None and age > 10:
                     text += "，請檢查 App 是否仍在前景辨識"
-                print(f"{PLATFORMS[p]}：{text}", flush=True)
+                print(f"{PLATFORMS[p]}：{self.links.get(p, '等待連線')}，{text}", flush=True)
 
 
-HELP = "看到車時輸入車號（例 941）按 Enter；離開輸入 end；備註 note 逆光；狀態 status；結束 q 或 Ctrl+C。"
+HELP = "看到車時輸入車號與方向（例 941 三峽）按 Enter；離開輸入 end；備註 note 逆光；狀態 status；結束 q 或 Ctrl+C。"
 
 
 def command(session, text, platforms):
@@ -94,12 +100,13 @@ def command(session, text, platforms):
         print("備註已存", flush=True)
     elif text == "status":
         session.status(platforms)
-    elif text not in ("end", "help") and LABEL.fullmatch(text) and any(c.isdigit() for c in text):
+    elif text not in ("end", "help") and LABEL.fullmatch(text.split()[0] if text else "") and any(c.isdigit() for c in text.split()[0]):
         if session.bus:
             print(f"正在記錄 {session.bus}，請先輸入 end，或用 note 註記同時進站的車。", flush=True)
         else:
-            session.bus = text.upper()
-            session.add("bus", route=session.bus)
+            route, _, direction = text.partition(" ")
+            session.bus = route.upper()
+            session.add("bus", route=session.bus, direction=direction.strip()[:80])
             print(f"已標記 {session.bus} 進入視野", flush=True)
     elif text:
         print(HELP, flush=True)
@@ -127,7 +134,10 @@ def main():
         ok = True
         for p in platforms:
             try:
-                print(f"{PLATFORMS[p]}：{discover(p, chosen[p])[1]} 已連線")
+                identifier, model = discover(p, chosen[p])
+                detail = "App 行程 "+ios_pid(run,identifier,APP) if p=="ios" else "已授權且套件存在"
+                prepare(p,identifier)
+                print(f"{PLATFORMS[p]}：{model} {detail}")
             except (DeviceError, ValueError, KeyError) as exc:
                 print(f"{PLATFORMS[p]}：{exc}")
                 ok = False

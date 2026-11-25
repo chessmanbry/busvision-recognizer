@@ -1,11 +1,10 @@
-import {isFeedFresh, selectArrival} from "./transitData.js";
+import {buildPatterns, enteringAtStop, stopDirection, isFeedFresh, selectArrival} from "./transitData.js";
 import { sameBoardingStop } from "./recognitionContext.js";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { gunzipSync, strFromU8 } from "fflate";
 import {
   parseFeedTime,
   normalizeRoutes,
-  normalizeStops,
   isNearCampus,
 } from "./transitData.js";
 const folders = { taipei: "blobbus", newtaipei: "ntpcbus" };
@@ -13,6 +12,8 @@ const files = {
   routes: "GetRoute.gz",
   stops: "GetStop.gz",
   arrivals: "GetEstimateTime.gz",
+  events: "GetBusEvent.gz",
+  paths: "GetPathDetail.gz",
 };
 const cache = new Map(),
   pending = new Map();
@@ -20,7 +21,7 @@ export async function loadTransitFeed(city, kind) {
   if (!folders[city] || !files[kind]) throw new Error("不支援的資料來源");
   const key = `${city}:${kind}`,
     saved = cache.get(key),
-    ttl = kind === "arrivals" ? 15000 : 86400000;
+    ttl = ["arrivals","events"].includes(kind) ? 15000 : 86400000;
   if (saved && Date.now() - saved.fetchedAt < ttl) return saved;
   if (pending.has(key)) return pending.get(key);
   const task = (async () => {
@@ -69,9 +70,18 @@ export async function loadTransitFeed(city, kind) {
 }
 export const loadArrivals = (city = "newtaipei") =>
   loadTransitFeed(city, "arrivals");
-export async function loadRouteStops(city, routeId) {
-  const feed = await loadTransitFeed(city, "stops");
-  return normalizeStops(feed.rows, routeId);
+const patternCache = new Map();
+export async function cityPatterns(city) {
+  const [routes, stops, paths] = await Promise.all(["routes","stops","paths"].map(k => loadTransitFeed(city,k)));
+  const key = [routes.fetchedAt,stops.fetchedAt,paths.fetchedAt].join("/");
+  if (patternCache.get(city)?.key !== key) patternCache.set(city, {key,
+    patterns:buildPatterns(normalizeRoutes(routes.rows,city), stops.rows, paths.rows)});
+  return patternCache.get(city).patterns;
+}
+export async function loadRouteStops(city, routeId, pathId) {
+  const patterns = (await cityPatterns(city)).filter(p => p.route.id === routeId);
+  const pattern = patterns.find(p => p.route.pathId === pathId) || (patterns.length === 1 && patterns[0]);
+  return pattern?.stops || [];
 }
 export async function loadCityCatalog(city) {
   const [routes, stops] = await Promise.all([
@@ -87,53 +97,36 @@ export async function loadCityCatalog(city) {
   };
 }
 export async function loadStationRecognitionContext(city, stop) {
-  const cities = await Promise.all(
-    ["taipei", "newtaipei"].map(async (source) => {
-      const [routes, stops] = await Promise.all([
-        loadTransitFeed(source, "routes"),
-        loadTransitFeed(source, "stops"),
-      ]);
-      const ids = new Set(
-        stops.rows
-          .filter((s) => sameBoardingStop(s, stop, source === city))
-          .map((s) => String(s.routeId)),
-      );
-      return normalizeRoutes(routes.rows, source)
-        .filter((r) => ids.has(r.id))
-        .map((r) => r.name);
-    }),
-  );
-  const routes = [...new Set(cities.flat())];
-  if (!routes.length) throw new Error("無法取得本站行經路線");
-  return {
-    name: stop.name,
-    address: stop.address,
-    city,
-    stopId: stop.id,
-    routes,
-  };
+  const groups = await Promise.all(["taipei","newtaipei"].map(async source => {
+    const services = [];
+    for (const {route,stops} of await cityPatterns(source)) {
+      const matches = stops.filter(s => sameBoardingStop({
+        Id:s.id, routeId:route.id, goBack:s.direction, stopLocationId:s.locationId,
+        latitude:s.lat, longitude:s.lon, nameZh:s.name
+      },stop,source === city));
+      if (new Set(matches.map(s => s.direction)).size > 1) continue;
+      for (const s of matches) services.push({city:source, routeId:route.id, pathId:route.pathId,
+        name:route.name, stopId:s.id, direction:s.direction, ...stopDirection(stops,s)});
+    }
+    return services;
+  }));
+  const services = groups.flat();
+  if (!services.length) throw Error("無法取得本站行經路線");
+  return {city, name:stop.name,address:stop.address,stopId:stop.id,services,
+    routes:[...new Set(services.map(s=>s.name))]};
 }
 
-export async function loadBoardingCandidates(target) {
-  const anchorRows = (await loadTransitFeed(target.city,'stops')).rows;
-  const anchor = anchorRows.find(r=>String(r.Id)===target.stop.id && String(r.routeId)===target.routeId && String(r.goBack)===target.stop.direction);
-  if (!anchor) return null;
-  const stop = {name:anchor.nameZh, locationId:String(anchor.stopLocationId || ''), lat:Number(anchor.latitude), lon:Number(anchor.longitude)};
-  const routes=new Set(), due=new Set();
-  let expires=Infinity;
-  await Promise.all(['taipei','newtaipei'].map(async city=>{
-    const [catalog,stops,arrivals]=await Promise.all(['routes','stops','arrivals'].map(kind=>loadTransitFeed(city,kind)));
-    if (!isFeedFresh(arrivals.updatedAt)) throw Error('stale arrivals');
-    expires=Math.min(expires,arrivals.updatedAt+120000);
-    const names=new Map(catalog.rows.map(r=>[String(r.Id),r.nameZh]));
-    // Direction codes are per route. Match the physical boarding point, then use each stop's own direction.
-    for(const row of stops.rows.filter(r=>sameBoardingStop(r,stop,city===target.city))){
-      const id=String(row.routeId), name=names.get(id);
-      if (!name) throw Error('incomplete station catalog');
-      routes.add(name);
-      const raw=selectArrival(arrivals.rows,id,{id:String(row.Id),direction:String(row.goBack)})?.EstimateTime;
-      if(raw!=null && String(raw).trim() && Number(raw)>=0 && Number(raw)<=180) due.add(name);
+export async function loadBoardingCandidates(station) {
+  const services = station.services || [];
+  const now = Date.now(), entering = [], due = new Set();
+  await Promise.all([...new Set(services.map(s=>s.city))].map(async city => {
+    const local = services.filter(s=>s.city === city);
+    const [events, estimates] = await Promise.all(["events","arrivals"].map(k=>loadTransitFeed(city,k).catch(()=>null)));
+    if (events) entering.push(...enteringAtStop(events.rows,local,events.updatedAt,Date.now()));
+    if (estimates && isFeedFresh(estimates.updatedAt)) for (const s of local) {
+      const raw = selectArrival(estimates.rows,s.routeId,{id:s.stopId,direction:s.direction})?.EstimateTime;
+      if (raw != null && String(raw).trim() && +raw >= 0 && +raw <= 180) due.add(s.name);
     }
   }));
-  return {routes:[...routes],due:[...due],expires};
+  return {routes:station.routes,services,entering,due:[...due],expires:now+30000};
 }

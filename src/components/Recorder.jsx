@@ -1,3 +1,6 @@
+import {fieldEvent,fieldStatus} from '../services/fieldSession.js';
+import {loadStationRecognitionContext} from '../services/transitApi.js';
+import {clearWaitingTarget,readWaitingTarget} from '../services/waitingTarget.js';
 import {openZoomCamera} from '../services/zoomCamera.js';
 import InfoPopup from './InfoPopup.jsx';
 import WaitingAssistant from './WaitingAssistant.jsx';
@@ -21,7 +24,7 @@ import {canUseNativeOcr,recognizeNativeText} from '../services/nativeOcr.js';
 import {literalRouteCandidates} from '../services/nativeRouteSelection.js';
 import { createVehicleDetector } from './vehicleDetector.js';
 
-import {readRecognitionContext,clearRecognitionContext,routeMatchesContext} from '../services/recognitionContext.js';
+import {saveRecognitionContext,readRecognitionContext,clearRecognitionContext,routeMatchesContext} from '../services/recognitionContext.js';
 
 const FOLDER_NAME = 'BusData';
 const APP_VOICE_KEY = 'busvision.appVoiceOff';
@@ -83,11 +86,12 @@ async function ensureDir() {
   await Filesystem.mkdir({ path: FOLDER_NAME, directory: Directory.Data, recursive: true }).catch(() => {});
 }
 async function saveDataUrl(path, dataUrl) {
-  if (!dataUrl) return;
+  if (!path || !dataUrl) return;
   await ensureDir();
   await Filesystem.writeFile({ directory: Directory.Data, path, data: dataUrlToBase64(dataUrl) });
 }
 async function speak(text, isCurrent) {
+  fieldEvent('request',{action:'speech',text});
   try {
     await TextToSpeech.speak({ text, lang: 'zh-TW', rate: 1.02, pitch: 1.0, volume: 1.0 });
     return;
@@ -134,6 +138,10 @@ async function waitForVideoReady(video, timeoutMs = 2600) {
 }
 
 function debugLog(label, payload = {}) {
+  if (/failed|fallback|error|timeout/.test(label)) fieldEvent('problem',{stage:label,message:String(payload.message || '').slice(0,160)});
+  if (label==='camera-started') fieldEvent('camera',{width:payload.videoWidth,height:payload.videoHeight});
+  if (label==='capture-video') fieldEvent('capture',{width:payload.canvasWidth,height:payload.canvasHeight});
+  if (label==='route-candidate') fieldEvent('ocr',{candidates:payload.route?[payload.route]:[]});
   try { console.log(`[BusVisionRecognizer] ${label}`, JSON.stringify(payload)); }
   catch { console.log(`[BusVisionRecognizer] ${label}`, payload); }
 }
@@ -577,7 +585,8 @@ export default function Recorder({ autoStartOnEntry = false }) {
     const timer = setTimeout(() => setNotice(null), Math.max(8000, Array.from(notice.text).length * 1000));
     return () => clearTimeout(timer);
   }, [notice]);
-  const targetResultHandler = useRef(null);
+  const sceneRef = useRef(null);
+  const [choosing,setChoosing]=useState(false);
   const [approaching, setApproaching] = useState(false);
   const approachingRef = useRef(false);
   useEffect(() => { approachingRef.current = approaching; }, [approaching]);
@@ -597,6 +606,10 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const mirrorRef = useRef(false);
 
   const [status, setStatus] = useState('對準公車車頭後辨識，或拍照、匯入照片。');
+  useEffect(()=>{
+    const showError=()=>showNotice(fieldStatus().failure);
+    window.addEventListener('field-error',showError);return ()=>window.removeEventListener('field-error',showError);
+  },[showNotice]);
   const [announcement, setAnnouncement] = useState('');
   const [engineStatus, setEngineStatus] = useState('號碼牌辨識待命');
   const [running, setRunning] = useState(false);
@@ -661,14 +674,18 @@ export default function Recorder({ autoStartOnEntry = false }) {
   const [debugLines, setDebugLines] = useState([]);
   const [debugOpen, setDebugOpen] = useState(false);
 
-  const reportTrackedRoute = React.useCallback(route=>{
-    const now=Date.now();
+  const reportTrackedRoute = React.useCallback((route,destination='')=>{
+    const now=Date.now(),key=route+'|'+destination;
     setLastRoute(route);setConfidence(.8);
-    if(lastSpokenRef.current.route===route && now-lastSpokenRef.current.at<30000)return;
-    lastSpokenRef.current={route,at:now};
-    const message=`辨識到 ${route}`;
+    if(lastSpokenRef.current.route===key && now-lastSpokenRef.current.at<30000)return;
+    lastSpokenRef.current={route:key,at:now};
+    const target=readWaitingTarget();
+    const matched=destination && target?.routeName===route && target.destination===destination;
+    const message=`${matched?'你要搭的':'辨識到'} ${route}，${destination?'往'+destination:'方向待確認'}`;
+    fieldEvent('confirmed',{source:'bus-crop',route,direction:destination || '待確認'});
     showNotice(message);
-    if(mutedRef.current)setAnnouncement(message);else void speak(message,()=>activeRef.current && !mutedRef.current);
+    if(mutedRef.current){fieldEvent('request',{action:'screen_reader',text:message});setAnnouncement(message);}
+    else void speak(message,()=>activeRef.current && !mutedRef.current);
   },[showNotice]);
 
   const reportStatus = (message, announce = true) => {
@@ -689,6 +706,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       const station = result.kind === 'found' ? result.context : null;
       setGpsStation(station);
       setGpsDisplay(station);
+      setChoosing(!!station?.choices?.length);
       const messages = {
         denied: '未取得定位權限。你仍可在公車查詢手動設定站點。',
         inaccurate: '定位不夠精準，請在戶外重試或手動設定站點。',
@@ -938,20 +956,18 @@ export default function Recorder({ autoStartOnEntry = false }) {
       return;
     }
     setStatus(`已辨識：${route}`);
-    const targetHandled = targetResultHandler.current?.({route, source, isCurrent});
-    if (!targetHandled && mutedRef.current) setAnnouncement(`辨識到 ${route}`);
-    const now = Date.now();
+    const message=`辨識到 ${route}，方向待確認`;
+    const now = Date.now(), key=route+'|';
     const id = `live_${now}`;
-    const imagePath = frame ? `${FOLDER_NAME}/${id}_frame.jpg` : '';
-    const cropPath = crop ? `${FOLDER_NAME}/${id}_crop.jpg` : '';
-    if (!targetHandled && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 30000)) showNotice(`辨識到 ${route}`);
-    const shouldSpeak = !targetHandled && !mutedRef.current && (lastSpokenRef.current.route !== route || now - lastSpokenRef.current.at > 30000);
-    if (shouldSpeak) {
-      lastSpokenRef.current = { route, at: now };
-      const canSpeak = () => !mutedRef.current && isCurrent();
-      void (source.endsWith('preview-ocr') || localStorage.getItem('busvision.hapticsOff') === 'true' ? Promise.resolve() : vibrateOk()).then(() => {
-        if (canSpeak()) return speak(`辨識到 ${route}`, canSpeak);
-      });
+    const retain = !fieldStatus().current || fieldStatus().current.photos;
+    const imagePath = retain && frame ? `${FOLDER_NAME}/${id}_frame.jpg` : '';
+    const cropPath = retain && crop ? `${FOLDER_NAME}/${id}_crop.jpg` : '';
+    if (lastSpokenRef.current.route !== key || now - lastSpokenRef.current.at > 30000) {
+      lastSpokenRef.current = { route:key, at:now };
+      fieldEvent('confirmed',{route,source,direction:'待確認'});
+      showNotice(message);
+      if (mutedRef.current){fieldEvent('request',{action:'screen_reader',text:message});setAnnouncement(message);}
+      else void speak(message,()=>!mutedRef.current && isCurrent());
     }
     const saveStartedAt = performance.now();
     try {
@@ -996,6 +1012,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       setEngineStatus('手機原生文字辨識');
       const context = readRecognitionContext() ||
         (source.endsWith('preview-ocr') ? readGpsStation() : null);
+      const multipleAtCapture=sceneRef.current?.crowded;
       const result=await runNativePipeline(dataUrl,{recognize:recognizeNativeText,context,isCurrent});
       diagnostic.attempted=result.attempted;
       if(!isCurrent())return;
@@ -1005,13 +1022,20 @@ export default function Recorder({ autoStartOnEntry = false }) {
       debugLog('native-ocr-result',{engine:result.engine,elapsedMs:diagnostic.ocrMs,lines:result.lines,selected:selection.best?.route||'',reliable:selection.reliable});
       setBusBox(null);setCandidates(selection.candidates.map(c=>({...c.line,label:c.route,score:c.score})));
       const best=selection.best;
+      const tokens=[...new Set(selection.candidates.map(c=>c.route))];
+      fieldEvent('ocr',{source,ms:diagnostic.ocrMs,candidates:tokens,route:best?.route});
+      if(autoSession && (multipleAtCapture || sceneRef.current?.crowded || tokens.length!==1 ||
+          !best || best.route.length<2 || (/^\d{2}$/.test(best.route) &&
+          (!context?.routes?.includes(best.route) || context.routes.some(r=>r!==best.route && r.includes(best.route)))))){
+        stableRef.current={route:'',count:0};diagnostic.outcome='unconfirmed';return;
+      }
       const frame=await canvasFromDataUrl(dataUrl);
       if(!isCurrent())return;
       const rect=best?{x:best.line.x*frame.width/result.width,y:best.line.y*frame.height/result.height,w:best.line.w*frame.width/result.width,h:best.line.h*frame.height/result.height,label:'原生文字區',score:best.score}:null;
       const crop=rect?cropCanvas(frame,rect,1).toDataURL('image/jpeg',.9):'';
       const raw=result.lines.map(l=>l.text).join(' ');
       setRawText(raw);setLastCrop(crop);
-      if(!best||!selection.reliable){
+      if(!best||!selection.reliable||/^\d$/.test(best.route)){
         diagnostic.outcome=selection.rejected.length&&!best?'station-mismatch':best?'unconfirmed':'no-result';
         setLastRoute(best?.route||'—');setConfidence(best?.route?0.5:0);
         if(autoSession)stableRef.current={route:'',count:0};
@@ -1028,7 +1052,7 @@ export default function Recorder({ autoStartOnEntry = false }) {
       await commitResult({route:best.route,raw,score:Math.max(.72,best.score),ocrConfidence:best.ocrConfidence*100,frame:dataUrl,crop,rect,vehicle:null,source,allCandidates:selection.candidates.map(c=>({...c.line,label:c.route,score:c.score})),frameWidth:frame.width,frameHeight:frame.height,timings,isCurrent});
       diagnostic.stage='done';
     }catch(error){diagnostic.outcome='error';if(isCurrent()){setLastRoute('—');setConfidence(0);reportStatus('辨識暫時無法完成，請再試一次。', !autoSession);}debugLog('native-ocr-failed',{message:String(error)});}
-    finally{diagnostic.totalMs=Math.round(performance.now()-startedAt);recordRecognitionTelemetry(diagnostic);if(isCurrent())setEngineStatus('手機辨識待命');}
+    finally{if(autoSession && diagnostic.outcome!=='recognized' && isCurrent())fieldEvent('no_result',{source});diagnostic.totalMs=Math.round(performance.now()-startedAt);recordRecognitionTelemetry(diagnostic);if(isCurrent())setEngineStatus('手機辨識待命');}
   };
 
   const runRecognition = async (dataUrl, source, autoSession, isCurrent) => {
@@ -1387,12 +1411,27 @@ export default function Recorder({ autoStartOnEntry = false }) {
         </header>
 
         <div className="bv-rec-dock">
+          {choosing && gpsStation?.choices && <section className="bv-station-choices" aria-label="依目的地或下一站確認候車站位">
+            <h2>你在哪一側候車？</h2>
+            {gpsStation.choices.flatMap(({services})=>services.map(({route,stop,destination,next})=>
+              <button className="use-stop" disabled={locating} key={[route.city,route.id,route.pathId,stop.id,stop.order].join('/')} onClick={async()=>{
+                setLocating(true);
+                try {
+                  const selected=await loadStationRecognitionContext(route.city,stop);
+                  if(!activeRef.current)return;
+                  clearWaitingTarget();saveRecognitionContext(selected);setStationDisplay(readRecognitionContext());
+                  setAnnouncement(`已確認${stop.name}，往${destination}的候車站位`);setChoosing(false);
+                }catch{setAnnouncement('站點資料暫時無法取得，請再試一次');}
+                finally{if(activeRef.current)setLocating(false);}
+              }}>{stop.name} · {route.name} 往 {destination || '待確認'}{next && '，下一站'+next}</button>))}
+            <button onClick={()=>setChoosing(false)}>略過站位確認</button>
+          </section>}
           {notice && <aside className="bv-event"><span>{notice.text}</span><button aria-label="關閉這則提示" onClick={() => setNotice(null)}>×</button></aside>}
           <div className="bv-quick"><label className="bv-zoom-slider"><span>{zoom}×</span>
             <input type="range" min="1" max="15" step="0.1" value={zoom} disabled={!previewReady}
               aria-label="相機變焦" aria-valuetext={`${zoom} 倍，${hwMax && zoom<=hwMax ? "相機變焦" : "數位放大"}`} onChange={e=>setZoom(Number(e.target.value))}/></label>
-          <InfoPopup><WaitingAssistant reportTrackedRoute={reportTrackedRoute} showNotice={showNotice} videoRef={videoRef} running={running && previewReady} mutedRef={mutedRef}
-            announce={setAnnouncement} speak={speak} onAligned={setAlignmentState} onApproaching={setApproaching} resultHandlerRef={targetResultHandler} />
+          <InfoPopup><WaitingAssistant key={stationDisplay?.selectedAt} reportTrackedRoute={reportTrackedRoute} station={stationDisplay} videoRef={videoRef} running={running && previewReady}
+            sceneRef={sceneRef} onAligned={setAlignmentState} onApproaching={setApproaching} />
           {lastRoute !== '—' && confidence > 0 && (
             <div className={`bv-result-card ${confidence >= .72 ? 'high' : 'mid'}`}>
               <span className="label">{confidence >= .72 ? '辨識到' : '待確認'}</span>
